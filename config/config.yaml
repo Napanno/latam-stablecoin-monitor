@@ -3,7 +3,7 @@
 # ============================================================================
 
 dune:
-  api_key: "UhYPpRg6UMhFWdAcPCwi4DvQkaIXZ7t1"
+  api_key: ${DUNE_API_KEY}
   queries:
     circulating_supply: 6239690
     mintburn: 6240230

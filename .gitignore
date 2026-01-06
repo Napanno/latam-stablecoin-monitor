@@ -17,7 +17,7 @@ env/
 # Data / logs
 
 data/raw/
-data/kpi/
+data/kpi_export/
 data/reports/
 logs/
 
