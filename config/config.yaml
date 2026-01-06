@@ -1,0 +1,40 @@
+# ============================================================================
+# LATAM Stablecoin Pipeline Configuration
+# ============================================================================
+
+dune:
+  api_key: "UhYPpRg6UMhFWdAcPCwi4DvQkaIXZ7t1"
+  queries:
+    circulating_supply: 6239690
+    mintburn: 6240230
+    dex_volume: 6240220
+    depeg_monitoring: 6240173
+
+paths:
+  raw_data: "./data/raw/"
+  processed_data: "./data/processed/"
+  kpi_export: "./data/kpi_export/"
+  reports: "./data/reports/"
+  logs: "./logs/"
+
+processing:
+  # Lookback period in days
+  lookback_days: 90
+
+  # KPI calculation settings
+  growth_thresholds:
+    high_growth: 10
+    moderate_growth: 2
+    moderate_decline: -10
+    high_decline: -10
+
+reporting:
+  # Report generation settings
+  top_n_tokens: 15
+  include_zero_supply: false
+  date_format: "%Y-%m-%d"
+  week_format: "%Y-W%V"
+
+logging:
+  level: "INFO"  # DEBUG, INFO, WARNING, ERROR
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
