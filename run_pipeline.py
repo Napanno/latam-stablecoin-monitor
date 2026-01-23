@@ -1,215 +1,215 @@
 """
-Main pipeline orchestrator for LATAM Stablecoin Weekly Report
-
-Coordinates:
-1. Data extraction from Dune Analytics
-2. KPI processing across all domains
-3. Report generation (console + JSON)
-
-Author: LATAM Stablecoin Team
-Date: 2025-12-29
-Version: 2.1.0 - DEPEG DISABLED
+Main pipeline orchestrator for LATAM Stablecoin Monitor v3.0
+Executes weekly analytics pipeline with 3 domains and 2 data sources
 """
-
-import sys
-from pathlib import Path
-from datetime import datetime
+from dotenv import load_dotenv # review
+load_dotenv() # review
+import os
 import yaml
+from datetime import datetime
+from pathlib import Path
 
-# Add project root to path
-project_root = Path(__file__).parent
-sys.path.insert(0, str(project_root))
+# Import utilities
+from utils.logger import setup_logging, get_logger
 
-from utils.logger import setup_logger
+# Import extractors
 from extractors.data_extractor import DuneDataExtractor
-from processors.supply_processor import SupplyKPIProcessor
-from processors.mintburn_processor import MintBurnKPIProcessor
-from processors.dex_processor import DexVolumeKPIProcessor
-from generators.report_generator import (
-    MinimalSupplyReporter,
-    MinimalMintBurnReporter,
-    MinimalDexReporter,
-    consolidate_reports_to_json
-)
 
-logger = setup_logger(__name__)
+# Import processors
+from processors.supply_processor import SupplyProcessor
+from processors.flows_processor import FlowsProcessor
+from processors.dex_processor import DexProcessor
 
-# =====================================================================
-# CONFIGURATION FLAG
-# =====================================================================
-ENABLE_DEPEG = False  # Set to True to re-enable depeg processing
+# Import generators
+from generators.report_generator import ReportGenerator
 
 
-def load_config(config_path: str = 'config.yaml') -> dict:
+def load_config(config_path='config/config.yaml'):
     """Load configuration from YAML file"""
     with open(config_path, 'r') as f:
-        return yaml.safe_load(f)
+        config = yaml.safe_load(f)
+    return config
+
+
+def validate_environment():
+    """Validate required environment variables"""
+    logger = get_logger(__name__)
+
+    if not os.getenv('DUNE_API_KEY'):
+        logger.error("DUNE_API_KEY environment variable not set")
+        raise EnvironmentError("Missing DUNE_API_KEY. Set it as: export DUNE_API_KEY='your_key'")
+
+    logger.debug("Environment validation passed")
+
+
+def create_output_directories(config):
+    """Create output directories if they don't exist"""
+    logger = get_logger(__name__)
+
+    directories = [
+        config['output']['raw_data_dir'],
+        config['output']['kpi_dir'],
+        config['output']['reports_dir'],
+        config['output']['logs_dir']
+    ]
+
+    for directory in directories:
+        Path(directory).mkdir(parents=True, exist_ok=True)
+        logger.debug(f"Created/verified directory: {directory}")
 
 
 def main():
     """Main pipeline execution"""
+
+    # Load configuration
+    config = load_config('config/config.yaml')
+
+    # Setup logging
+    setup_logging(
+        log_dir=config['output']['logs_dir'],
+        log_level=config['logging']['level']
+    )
+
+    logger = get_logger(__name__)
+
+    logger.info("=" * 80)
+    logger.info("LATAM STABLECOIN WEEKLY REPORT PIPELINE v3.0 - STARTING")
+    logger.info("=" * 80)
+
+    start_time = datetime.now()
+    timestamp = start_time.strftime('%Y%m%d%H%M%S')
+
     try:
-        logger.info("\n" + "=" * 80)
-        logger.info("LATAM STABLECOIN WEEKLY REPORT PIPELINE - STARTING")
-        if not ENABLE_DEPEG:
-            logger.info("⚠️  DEPEG MONITORING DISABLED")
-        logger.info("=" * 80)
+        # Validate environment
+        logger.info("Validating environment...")
+        validate_environment()
 
-        start_time = datetime.now()
-        timestamp = start_time.strftime('%Y%m%d_%H%M%S')
+        # Create output directories
+        logger.info("Creating output directories...")
+        create_output_directories(config)
 
-        # Load configuration
-        config = load_config()
-        logger.info("✓ Configuration loaded")
-
-        # =====================================================================
-        # STEP 1: DATA EXTRACTION
-        # =====================================================================
+        # ====================================================================
+        # STEP 1: EXTRACT DATA FROM DUNE ANALYTICS
+        # ====================================================================
         logger.info("\n" + "=" * 80)
         logger.info("STEP 1: EXTRACTING DATA FROM DUNE ANALYTICS")
         logger.info("=" * 80)
 
-        extractor = DuneDataExtractor()
+        extractor = DuneDataExtractor(config_path='config/config.yaml')
+        raw_data = extractor.extract_all()
 
-        # Extract all datasets at once
-        all_data = extractor.extract_all()
+        # Validate extraction results
+        if not raw_data:
+            logger.error("Data extraction failed - no data returned")
+            return 1
 
-        # Map to individual variables
-        supply_data = all_data['circulating_supply']
-        mintburn_data = all_data['mintburn']
-        dex_data = all_data['dex_volume']
+        if 'flows' not in raw_data or raw_data['flows'] is None:
+            logger.error("Flows data extraction failed")
+            return 1
 
-        if ENABLE_DEPEG:
-            depeg_data = all_data['depeg_monitoring']
-        else:
-            logger.info("\n⊘ Depeg monitoring data extraction skipped (DISABLED)")
-            depeg_data = None
+        if 'dex' not in raw_data or raw_data['dex'] is None:
+            logger.error("DEX data extraction failed")
+            return 1
 
-        logger.info("\n✓ Data extraction completed")
-        logger.info(f"  - Supply records: {len(supply_data):,}")
-        logger.info(f"  - Mint/Burn records: {len(mintburn_data):,}")
-        logger.info(f"  - DEX volume records: {len(dex_data):,}")
-        if ENABLE_DEPEG and depeg_data is not None:
-            logger.info(f"  - Depeg monitoring records: {len(depeg_data):,}")
-        else:
-            logger.info(f"  - Depeg monitoring: DISABLED")
+        # Log extraction results
+        logger.info(f"\n✓ Data extraction completed:")
+        logger.info(f"  - Flows (tokens.transfers): {len(raw_data['flows']):,} rows")
+        logger.info(f"  - DEX (dex.trades): {len(raw_data['dex']):,} rows")
 
-        # =====================================================================
-        # STEP 2: KPI PROCESSING
-        # =====================================================================
+        # ====================================================================
+        # STEP 2: PROCESS KPIs ACROSS 3 DOMAINS
+        # ====================================================================
         logger.info("\n" + "=" * 80)
         logger.info("STEP 2: PROCESSING KPIs")
         logger.info("=" * 80)
 
-        # Process Supply KPIs
-        logger.info("\n→ Processing Supply KPIs...")
-        supply_processor = SupplyKPIProcessor()
-        supply_kpis = supply_processor.process_all(supply_data)
-        supply_files = supply_processor.export_kpis(timestamp)
-        logger.info(f"✓ Supply: {len(supply_files)} KPI files exported")
+        # Domain 1: Supply (uses flows data)
+        logger.info("\nProcessing Domain 1: Supply...")
+        supply_processor = SupplyProcessor()
+        supply_processor.process_all(raw_data['flows'])
+        supply_kpis = supply_processor.export_kpis(timestamp)
+        logger.info(f"✓ Supply KPIs exported: {len(supply_kpis)} files")
 
-        # Process Mint/Burn KPIs
-        logger.info("\n→ Processing Mint/Burn KPIs...")
-        mintburn_processor = MintBurnKPIProcessor()
-        mintburn_kpis = mintburn_processor.process_all(mintburn_data)
-        mintburn_files = mintburn_processor.export_kpis(timestamp)
-        logger.info(f"✓ Mint/Burn: {len(mintburn_files)} KPI files exported")
+        # Domain 2: Flows (uses flows data)
+        logger.info("\nProcessing Domain 2: Mint/Burn Flows...")
+        flows_processor = FlowsProcessor()
+        flows_processor.process_all(raw_data['flows'])
+        flows_kpis = flows_processor.export_kpis(timestamp)
+        logger.info(f"✓ Flows KPIs exported: {len(flows_kpis)} files")
 
-        # Process DEX Volume KPIs
-        logger.info("\n→ Processing DEX Volume KPIs...")
-        dex_processor = DexVolumeKPIProcessor()
-        dex_kpis = dex_processor.process_all(dex_data)
-        dex_files = dex_processor.export_kpis(timestamp)
-        logger.info(f"✓ DEX Volume: {len(dex_files)} KPI files exported")
+        # Domain 3: DEX (uses dex data)
+        logger.info("\nProcessing Domain 3: DEX Volume...")
+        dex_processor = DexProcessor()
+        dex_processor.process_all(raw_data['dex'])
+        dex_kpis = dex_processor.export_kpis(timestamp)
+        logger.info(f"✓ DEX KPIs exported: {len(dex_kpis)} files")
 
-        # DEPEG PROCESSING (CONDITIONAL)
-        if ENABLE_DEPEG and depeg_data is not None:
-            logger.info("\n→ Processing Depeg Monitoring KPIs...")
-            from processors.depeg_processor import DepegKPIProcessor
-            depeg_processor = DepegKPIProcessor()
-            depeg_kpis = depeg_processor.process_all(depeg_data)
-            depeg_files = depeg_processor.export_kpis(timestamp)
-            logger.info(f"✓ Depeg: {len(depeg_files)} KPI files exported")
-        else:
-            logger.info("\n⊘ Skipping depeg KPI processing (DISABLED)")
-            depeg_kpis = None
-            depeg_files = {}
+        # Total KPI files
+        total_kpis = len(supply_kpis) + len(flows_kpis) + len(dex_kpis)
+        logger.info(f"\n✓ Total KPI files: {total_kpis}")
 
-        logger.info("\n✓ All KPI processing completed")
-
-        # =====================================================================
-        # STEP 3: REPORT GENERATION
-        # =====================================================================
+        # ====================================================================
+        # STEP 3: GENERATE REPORTS
+        # ====================================================================
         logger.info("\n" + "=" * 80)
         logger.info("STEP 3: GENERATING REPORTS")
         logger.info("=" * 80)
 
-        # Generate minimal reports (console output)
-        logger.info("\n→ Generating LinkedIn-style minimal reports...")
+        report_generator = ReportGenerator()
 
-        supply_reporter = MinimalSupplyReporter()
-        supply_report = supply_reporter.generate_minimal_report(supply_kpis)
-
-        mintburn_reporter = MinimalMintBurnReporter()
-        mintburn_report = mintburn_reporter.generate_minimal_report(mintburn_kpis)
-
-        dex_reporter = MinimalDexReporter()
-        dex_report = dex_reporter.generate_minimal_report(dex_kpis)
-
-        # DEPEG REPORTING (CONDITIONAL)
-        if ENABLE_DEPEG and depeg_kpis is not None:
-            from generators.report_generator import MinimalDepegReporter
-            depeg_reporter = MinimalDepegReporter()
-            depeg_report = depeg_reporter.generate_minimal_report(depeg_kpis)
-        else:
-            logger.info("\n⊘ Skipping depeg report generation (DISABLED)")
-            depeg_report = None
-
-        # Consolidate all reports into single JSON
-        logger.info("\n" + "=" * 80)
-        logger.info("CONSOLIDATING REPORTS TO JSON")
-        logger.info("=" * 80)
-
-        json_path = consolidate_reports_to_json(
-            supply_report=supply_report,
-            mintburn_report=mintburn_report,
-            dex_report=dex_report,
-            depeg_report=depeg_report  # Will be None if disabled
+        # Generate consolidated JSON report
+        logger.info("\nGenerating consolidated report...")
+        report_path = report_generator.generate_consolidated_report(
+            supply_kpis=supply_kpis,
+            flows_kpis=flows_kpis,
+            dex_kpis=dex_kpis,
+            timestamp=timestamp
         )
 
-        logger.info(f"\n✓ Consolidated report available at: {json_path}")
+        logger.info(f"✓ Consolidated report saved: {report_path}")
 
-        # =====================================================================
+        # ====================================================================
         # PIPELINE COMPLETION
-        # =====================================================================
+        # ====================================================================
         end_time = datetime.now()
-        duration = (end_time - start_time).total_seconds()
+        execution_time = (end_time - start_time).total_seconds()
 
         logger.info("\n" + "=" * 80)
-        logger.info("PIPELINE EXECUTION COMPLETED SUCCESSFULLY")
+        logger.info("PIPELINE EXECUTION COMPLETED SUCCESSFULLY ✓")
         logger.info("=" * 80)
-        logger.info(f"✓ Total execution time: {duration:.2f} seconds")
-        logger.info(f"✓ Timestamp: {timestamp}")
-
-        total_kpi_files = len(supply_files) + len(mintburn_files) + len(dex_files) + len(depeg_files)
-        logger.info(f"✓ KPI files: {total_kpi_files}")
-
-        if not ENABLE_DEPEG:
-            logger.info("⚠️  Depeg monitoring was DISABLED for this run")
-
-        logger.info(f"✓ Consolidated JSON: {json_path}")
-        logger.info("=" * 80 + "\n")
+        logger.info(f"Start time:       {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
+        logger.info(f"End time:         {end_time.strftime('%Y-%m-%d %H:%M:%S')}")
+        logger.info(f"Execution time:   {execution_time:.2f} seconds ({execution_time / 60:.1f} minutes)")
+        logger.info(f"Timestamp:        {timestamp}")
+        logger.info("")
+        logger.info("Output files:")
+        logger.info(f"  - Raw data:     {config['output']['raw_data_dir']}")
+        logger.info(f"  - KPI files:    {config['output']['kpi_dir']} ({total_kpis} files)")
+        logger.info(f"  - Report:       {report_path}")
+        logger.info(
+            f"  - Log:          {config['output']['logs_dir']}/pipeline_{datetime.now().strftime('%Y%m%d')}.log")
+        logger.info("=" * 80)
 
         return 0
 
+    except EnvironmentError as e:
+        logger.error("\n" + "=" * 80)
+        logger.error("ENVIRONMENT ERROR")
+        logger.error("=" * 80)
+        logger.error(f"Error: {str(e)}")
+        logger.error("=" * 80)
+        return 1
+
     except Exception as e:
         logger.error("\n" + "=" * 80)
-        logger.error("PIPELINE EXECUTION FAILED")
+        logger.error("PIPELINE EXECUTION FAILED ✗")
         logger.error("=" * 80)
-        logger.error(f"Error: {str(e)}", exc_info=True)
-        logger.error("=" * 80 + "\n")
+        logger.error(f"Error: {str(e)}")
+        logger.error("", exc_info=True)  # Full stack trace
+        logger.error("=" * 80)
         return 1
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    exit_code = main()
+    exit(exit_code)

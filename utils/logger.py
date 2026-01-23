@@ -1,61 +1,94 @@
 """
-Centralized logging configuration
+Centralized logging configuration for LATAM Stablecoin Pipeline
 """
 
 import logging
+import os
 from pathlib import Path
 from datetime import datetime
-import yaml
-import sys
 
 
-def setup_logger(name: str, config_path: str = 'config.yaml') -> logging.Logger:
+def setup_logging(log_dir='./logs', log_level='INFO'):
     """
-    Setup logger with configuration from config.yaml
+    Setup centralized logging configuration
 
     Args:
-        name: Logger name (usually __name__)
-        config_path: Path to config.yaml
+        log_dir (str): Directory for log files
+        log_level (str): Logging level (DEBUG, INFO, WARNING, ERROR)
 
     Returns:
-        Configured logger instance
+        logging.Logger: Configured root logger
     """
-    # Load config
-    with open(config_path, 'r') as f:
-        config = yaml.safe_load(f)
+    # Create logs directory if it doesn't exist
+    log_path = Path(log_dir)
+    log_path.mkdir(parents=True, exist_ok=True)
 
-    log_config = config['logging']
-    log_dir = Path(config['paths']['logs'])
-    log_dir.mkdir(parents=True, exist_ok=True)
+    # Generate log filename with today's date
+    log_filename = log_path / f"pipeline_{datetime.now().strftime('%Y%m%d')}.log"
 
-    # Create logger
-    logger = logging.getLogger(name)
-    logger.setLevel(getattr(logging, log_config['level']))
+    # Configure root logger
+    root_logger = logging.getLogger()
+    root_logger.setLevel(getattr(logging, log_level.upper()))
 
-    # Remove existing handlers
-    logger.handlers.clear()
+    # Clear any existing handlers
+    root_logger.handlers.clear()
 
-    # Console handler - ONLY WARNINGS AND ERRORS
-    console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(logging.WARNING)  # ← CHANGED: Was logging.INFO
-    console_formatter = logging.Formatter(log_config['format'])
+    # File handler (DEBUG level - everything)
+    file_handler = logging.FileHandler(log_filename, encoding='utf-8')
+    file_handler.setLevel(logging.DEBUG)
+    file_formatter = logging.Formatter(
+        '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    file_handler.setFormatter(file_formatter)
+
+    # Console handler (WARNING level - only warnings and errors)
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.WARNING)
+    console_formatter = logging.Formatter(
+        '%(levelname)s - %(message)s'
+    )
     console_handler.setFormatter(console_formatter)
 
-    # Force UTF-8 for Windows
-    if sys.platform == 'win32':
-        try:
-            sys.stdout.reconfigure(encoding='utf-8')
-        except AttributeError:
-            pass
+    # Add handlers to root logger
+    root_logger.addHandler(file_handler)
+    root_logger.addHandler(console_handler)
 
-    logger.addHandler(console_handler)
+    return root_logger
 
-    # File handler - Keep DEBUG for detailed logs
-    log_file = log_dir / f"pipeline_{datetime.now().strftime('%Y%m%d')}.log"
-    file_handler = logging.FileHandler(log_file, encoding='utf-8')
-    file_handler.setLevel(logging.DEBUG)
-    file_formatter = logging.Formatter(log_config['format'])
-    file_handler.setFormatter(file_formatter)
-    logger.addHandler(file_handler)
 
-    return logger
+def get_logger(name):
+    """
+    Get a logger instance for a specific module
+
+    Args:
+        name (str): Name of the logger (typically __name__)
+
+    Returns:
+        logging.Logger: Logger instance
+
+    Example:
+        from utils.logger import get_logger
+        logger = get_logger(__name__)
+        logger.info("Processing started")
+    """
+    return logging.getLogger(name)
+
+
+def set_console_level(level='INFO'):
+    """
+    Change console logging level at runtime
+
+    Args:
+        level (str): New logging level (DEBUG, INFO, WARNING, ERROR)
+    """
+    root_logger = logging.getLogger()
+    for handler in root_logger.handlers:
+        if isinstance(handler, logging.StreamHandler) and not isinstance(handler, logging.FileHandler):
+            handler.setLevel(getattr(logging, level.upper()))
+
+
+# Initialize logging when module is imported
+# Can be overridden by calling setup_logging() with custom parameters
+if not logging.getLogger().handlers:
+    setup_logging()

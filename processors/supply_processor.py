@@ -1,214 +1,158 @@
-"""
-Process circulating supply data and calculate KPIs
-"""
-
 import pandas as pd
-from pathlib import Path
 from typing import Dict
-import yaml
+from datetime import datetime
+import numpy as np
+from processors.base_processor import BaseProcessor
+from utils.logger import get_logger
+from utils.date_utils import get_iso_week
 
-from utils.logger import setup_logger
-
-logger = setup_logger(__name__)
+logger = get_logger(__name__)
 
 
-class SupplyKPIProcessor:
-    """Calculate supply-related KPIs"""
+class SupplyProcessor(BaseProcessor):
+    """Domain 1: On-Chain Supply KPIs"""
 
-    def __init__(self, config_path: str = 'config.yaml'):
-        """Initialize processor with config"""
-        with open(config_path, 'r') as f:
-            self.config = yaml.safe_load(f)
+    def __init__(self):
+        super().__init__(domain_name="Supply")
 
-        self.kpi_dir = Path(self.config['paths']['kpi_export'])
-        self.kpi_dir.mkdir(parents=True, exist_ok=True)
-
-        self.kpis = {}
-
-    def load_raw_data(self, df: pd.DataFrame) -> pd.DataFrame:
+    def process_all(self, raw_data: pd.DataFrame) -> Dict[str, pd.DataFrame]:
         """
-        Load and prepare raw supply data
+        Process tokens.transfers data for supply metrics
 
         Args:
-            df: Raw supply data from Dune
+            raw_data: tokens.transfers raw data from Dune
 
         Returns:
-            Cleaned DataFrame
+            Dict with KPIs:
+            - weekly_supply
+            - supply_by_chain
+            - supply_by_token
+            - supply_growth_rate
         """
-        logger.info("Loading and cleaning supply data...")
+        logger.info(f"[{self.domain_name}] Processing {len(raw_data):,} transfer events")
 
+        # Step 1: Data cleaning
+        df = self._clean_data(raw_data)
+        self.log_processing_summary(df, "after_cleaning")
+
+        # Step 2: Calculate cumulative supply (mints - burns)
+        df = self._calculate_cumulative_supply(df)
+        self.log_processing_summary(df, "after_cumulative")
+
+        # Step 3: Generate KPIs
+        self.kpi_data = {
+            "weekly_supply": self._kpi1_weekly_supply(df),
+            "supply_by_chain": self._kpi2_supply_by_chain(df),
+            "supply_by_token": self._kpi3_supply_by_token(df),
+            "growth_rate": self._kpi4_growth_rate(df),
+        }
+
+        return self.kpi_data
+
+    def _clean_data(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Prepare raw data for processing"""
         df = df.copy()
-        df['week'] = pd.to_datetime(df['week'])
 
-        # Fill NaN values
-        df = df.fillna({
-            'circulating_supply_tokens': 0,
-            'weekly_minted_tokens': 0,
-            'weekly_burned_tokens': 0,
-            'weekly_net_flow_tokens': 0
-        }).infer_objects(copy=False)
+        # Convert date columns
+        if 'block_time' in df.columns:
+            df['block_time'] = pd.to_datetime(df['block_time'], errors='coerce')
 
-        logger.info(f"✓ Loaded {len(df):,} rows")
+        # Convert numeric columns
+        numeric_cols = ['amount', 'amount_usd']
+        df = self.clean_numeric_columns(df, numeric_cols)
+
+        # Add week identifier
+        df['week'] = df['block_time'].dt.isocalendar().apply(
+            lambda x: f"{x.year}_W{x.week:02d}", axis=1
+        )
+
+        # Remove rows with missing critical data
+        df = df.dropna(subset=['block_time', 'blockchain', 'contract_address'])
+
         return df
 
-    def calculate_kpi1_weekly_supply(self, df: pd.DataFrame) -> pd.DataFrame:
-        """KPI 1: Weekly On-chain Circulating Supply"""
-        logger.info("Calculating KPI 1: Weekly On-chain Circulating Supply...")
+    def _calculate_cumulative_supply(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Calculate cumulative supply by mint/burn logic"""
+        df = df.copy()
 
-        kpi1 = df[[
-            'week', 'stablecoin', 'blockchain',
-            'circulating_supply_tokens',
-            'weekly_minted_tokens', 'weekly_burned_tokens',
-            'weekly_net_flow_tokens'
-        ]].copy()
+        # Identify mints and burns
+        null_address = "0x0000000000000000000000000000000000000000"
+        df['is_mint'] = df['from'].str.lower() == null_address.lower()
+        df['is_burn'] = df['to'].str.lower() == null_address.lower()
 
-        kpi1 = kpi1.sort_values(['week', 'circulating_supply_tokens'], ascending=[False, False])
+        # Calculate supply impact (mints add, burns subtract)
+        df['supply_impact'] = 0
+        df.loc[df['is_mint'], 'supply_impact'] = df['amount']
+        df.loc[df['is_burn'], 'supply_impact'] = -df['amount']
 
-        self.kpis['kpi1_weekly_supply'] = kpi1
-        logger.info(f"✓ KPI 1 calculated: {len(kpi1):,} rows")
+        return df
 
-        return kpi1
-
-    def calculate_kpi2_supply_by_chain(self, df: pd.DataFrame) -> pd.DataFrame:
-        """KPI 2: Cumulative Supply by Chain"""
-        logger.info("Calculating KPI 2: Cumulative Supply by Chain...")
-
-        latest_week = df['week'].max()
-        kpi2 = df[df['week'] == latest_week].copy()
-
-        # Calculate chain share
-        kpi2.loc[:, 'chain_share_pct'] = kpi2.groupby('stablecoin')['circulating_supply_tokens'].transform(
-            lambda x: (x / x.sum() * 100) if x.sum() > 0 else 0
-        )
-
-        kpi2 = kpi2.sort_values('circulating_supply_tokens', ascending=False)
-
-        self.kpis['kpi2_supply_by_chain'] = kpi2
-        logger.info(f"✓ KPI 2 calculated: {len(kpi2):,} rows")
-
-        return kpi2
-
-    def calculate_kpi3_total_supply(self, df: pd.DataFrame) -> pd.DataFrame:
-        """KPI 3: Total Supply Across All Chains"""
-        logger.info("Calculating KPI 3: Total Supply Across All Chains...")
-
-        kpi3 = df.groupby(['week', 'stablecoin']).agg({
-            'circulating_supply_tokens': 'sum',
-            'weekly_minted_tokens': 'sum',
-            'weekly_burned_tokens': 'sum',
-            'weekly_net_flow_tokens': 'sum'
+    def _kpi1_weekly_supply(self, df: pd.DataFrame) -> pd.DataFrame:
+        """KPI 1.1 & 1.2: Weekly supply by token/chain + total"""
+        kpi = df.groupby(['week', 'blockchain', 'symbol']).agg({
+            'supply_impact': 'sum',
+            'block_time': 'max'
         }).reset_index()
 
-        kpi3.rename(columns={
-            'circulating_supply_tokens': 'total_supply_all_chains',
-            'weekly_minted_tokens': 'total_mints_all_chains',
-            'weekly_burned_tokens': 'total_burns_all_chains',
-            'weekly_net_flow_tokens': 'total_net_flow_all_chains'
-        }, inplace=True)
+        # Cumulative supply (group level)
+        kpi['cumulative_supply'] = kpi.groupby(['blockchain', 'symbol'])['supply_impact'].cumsum()
 
-        kpi3 = kpi3.sort_values(['week', 'total_supply_all_chains'], ascending=[False, False])
+        # Rename for clarity
+        kpi = kpi.rename(columns={'cumulative_supply': 'circulating_supply_tokens'})
 
-        # Calculate market share
-        kpi3['market_share_pct'] = kpi3.groupby('week')['total_supply_all_chains'].transform(
-            lambda x: (x / x.sum() * 100) if x.sum() > 0 else 0
-        )
+        return kpi[['week', 'blockchain', 'symbol', 'circulating_supply_tokens']]
 
-        self.kpis['kpi3_total_supply'] = kpi3
-        logger.info(f"✓ KPI 3 calculated: {len(kpi3):,} rows")
+    def _kpi2_supply_by_chain(self, df: pd.DataFrame) -> pd.DataFrame:
+        """KPI 1.4: Supply share by blockchain"""
+        # Get latest week's supply
+        latest_week = df['week'].max()
+        latest = df[df['week'] == latest_week]
 
-        return kpi3
+        chain_supply = latest.groupby('blockchain').agg({
+            'supply_impact': 'sum'
+        }).reset_index()
 
-    def calculate_kpi4_growth_rate(self, kpi3: pd.DataFrame) -> pd.DataFrame:
-        """KPI 4: Supply Growth Rate"""
-        logger.info("Calculating KPI 4: Supply Growth Rate...")
+        # Calculate total and share
+        total_supply = chain_supply['supply_impact'].sum()
+        chain_supply['chain_share_pct'] = (chain_supply['supply_impact'] / total_supply * 100).round(2)
 
-        kpi4 = kpi3.copy()
-        kpi4 = kpi4.sort_values(['stablecoin', 'week'])
+        return chain_supply.rename(columns={
+            'supply_impact': 'circulating_supply_tokens'
+        })
+
+    def _kpi3_supply_by_token(self, df: pd.DataFrame) -> pd.DataFrame:
+        """KPI 1.3: Supply share by token"""
+        latest_week = df['week'].max()
+        latest = df[df['week'] == latest_week]
+
+        token_supply = latest.groupby('symbol').agg({
+            'supply_impact': 'sum'
+        }).reset_index()
+
+        # Calculate total and share
+        total_supply = token_supply['supply_impact'].sum()
+        token_supply['token_share_pct'] = (token_supply['supply_impact'] / total_supply * 100).round(2)
+
+        token_supply['week'] = latest_week
+
+        return token_supply.rename(columns={
+            'supply_impact': 'circulating_supply_tokens'
+        })[['week', 'symbol', 'circulating_supply_tokens', 'token_share_pct']]
+
+    def _kpi4_growth_rate(self, df: pd.DataFrame) -> pd.DataFrame:
+        """KPI 1.5: Week-over-week supply growth"""
+        weekly_totals = df.groupby('week').agg({
+            'supply_impact': 'sum'
+        }).reset_index().rename(columns={'supply_impact': 'weekly_supply'})
+
+        # Cumulative supply
+        weekly_totals['cumulative_supply'] = weekly_totals['weekly_supply'].cumsum()
 
         # WoW growth rate
-        kpi4['supply_growth_rate_pct'] = (
-                kpi4.groupby('stablecoin')['total_supply_all_chains']
-                .pct_change() * 100
-        )
+        weekly_totals['prev_week_supply'] = weekly_totals['cumulative_supply'].shift(1)
+        weekly_totals['growth_rate_pct'] = (
+                (weekly_totals['cumulative_supply'] - weekly_totals['prev_week_supply']) /
+                weekly_totals['prev_week_supply'] * 100
+        ).round(2)
 
-        # Absolute change
-        kpi4['supply_change_abs'] = (
-            kpi4.groupby('stablecoin')['total_supply_all_chains']
-            .diff()
-        )
-
-        # Classification
-        thresholds = self.config['processing']['growth_thresholds']
-
-        def classify_growth(rate):
-            if pd.isna(rate):
-                return 'N/A'
-            elif rate > thresholds['high_growth']:
-                return 'HIGH_GROWTH'
-            elif rate > thresholds['moderate_growth']:
-                return 'MODERATE_GROWTH'
-            elif rate > thresholds['moderate_decline']:
-                return 'STABLE'
-            elif rate > thresholds['high_decline']:
-                return 'MODERATE_DECLINE'
-            else:
-                return 'HIGH_DECLINE'
-
-        kpi4['growth_classification'] = kpi4['supply_growth_rate_pct'].apply(classify_growth)
-
-        self.kpis['kpi4_growth_rate'] = kpi4
-        logger.info(f"✓ KPI 4 calculated: {len(kpi4):,} rows")
-
-        return kpi4
-
-    def process_all(self, df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
-        """
-        Process all supply KPIs
-
-        Args:
-            df: Raw supply data
-
-        Returns:
-            Dictionary of KPI DataFrames
-        """
-        logger.info("=" * 80)
-        logger.info("PROCESSING SUPPLY KPIs")
-        logger.info("=" * 80)
-
-        # Clean data
-        df_clean = self.load_raw_data(df)
-
-        # Calculate KPIs
-        self.calculate_kpi1_weekly_supply(df_clean)
-        self.calculate_kpi2_supply_by_chain(df_clean)
-        kpi3 = self.calculate_kpi3_total_supply(df_clean)
-        self.calculate_kpi4_growth_rate(kpi3)
-
-        logger.info("\n✅ All Supply KPIs calculated successfully")
-        return self.kpis
-
-    def export_kpis(self, timestamp: str = None) -> Dict[str, Path]:
-        """Export KPIs to CSV with week in filename"""
-        if timestamp is None:
-            from datetime import datetime
-            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-
-        logger.info("Exporting KPI CSVs...")
-        exported = {}
-
-        for kpi_name, kpi_df in self.kpis.items():
-            # Extract week from the data
-            if 'week' in kpi_df.columns:
-                latest_week = kpi_df['week'].max()
-                week_str = latest_week.strftime('%Y_W%W')  # e.g., 2025_W52
-                filename = f"{kpi_name}_{week_str}_{timestamp}.csv"
-            else:
-                filename = f"{kpi_name}_{timestamp}.csv"
-
-            filepath = self.kpi_dir / filename
-            kpi_df.to_csv(filepath, index=False)
-            exported[kpi_name] = filepath
-            logger.info(f"✓ {filepath}")
-
-        logger.info(f"✓ Exported {len(exported)} KPI files")
-        return exported
+        return weekly_totals[['week', 'cumulative_supply', 'growth_rate_pct']]

@@ -1,203 +1,171 @@
-"""
-Process mint/burn transaction data and calculate KPIs
-"""
-
 import pandas as pd
-from pathlib import Path
 from typing import Dict
-import yaml
+from processors.base_processor import BaseProcessor
+from utils.logger import get_logger
 
-from utils.logger import setup_logger
-
-logger = setup_logger(__name__)
+logger = get_logger(__name__)
 
 
-class MintBurnKPIProcessor:
-    """Calculate mint/burn activity KPIs"""
+class FlowsProcessor(BaseProcessor):
+    """Domain 2: Mint/Burn Transaction Flows"""
 
-    def __init__(self, config_path: str = 'config.yaml'):
-        """Initialize processor with config"""
-        with open(config_path, 'r') as f:
-            self.config = yaml.safe_load(f)
+    def __init__(self):
+        super().__init__(domain_name="Flows")
 
-        self.kpi_dir = Path(self.config['paths']['kpi_export'])
-        self.kpi_dir.mkdir(parents=True, exist_ok=True)
-
-        self.kpis = {}
-
-    def load_raw_data(self, df: pd.DataFrame) -> pd.DataFrame:
+    def process_all(self, raw_data: pd.DataFrame) -> Dict[str, pd.DataFrame]:
         """
-        Load and prepare raw mint/burn data
+        Process tokens.transfers data for flow metrics (Daily aggregation)
 
         Args:
-            df: Raw mint/burn data from Dune
+            raw_data: tokens.transfers raw data from Dune
 
         Returns:
-            Cleaned DataFrame
+            Dict with KPIs:
+            - daily_flows
+            - weekly_aggregates
+            - net_issuance
+            - wow_change
         """
-        logger.info("Loading and cleaning mint/burn data...")
+        logger.info(f"[{self.domain_name}] Processing {len(raw_data):,} transfer events")
 
+        # Step 1: Data cleaning
+        df = self._clean_data(raw_data)
+        self.log_processing_summary(df, "after_cleaning")
+
+        # Step 2: Identify mints and burns
+        df = self._classify_flows(df)
+        self.log_processing_summary(df, "after_classification")
+
+        # Step 3: Generate KPIs
+        self.kpi_data = {
+            "daily_flows": self._kpi1_daily_flows(df),
+            "weekly_aggregates": self._kpi2_weekly_aggregates(df),
+            "net_issuance": self._kpi3_net_issuance(df),
+            "wow_change": self._kpi4_wow_change(df),
+        }
+
+        return self.kpi_data
+
+    def _clean_data(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Prepare raw data for flow processing"""
         df = df.copy()
-        df['block_date'] = pd.to_datetime(df['block_date'])
 
-        # Fill NaN values
-        df = df.fillna({
-            'mint_count': 0,
-            'burn_count': 0,
-            'mint_volume': 0,
-            'burn_volume': 0,
-            'net_volume': 0
-        }).infer_objects(copy=False)
+        # Convert date columns
+        if 'block_time' in df.columns:
+            df['block_time'] = pd.to_datetime(df['block_time'], errors='coerce')
 
-        logger.info(f"✓ Loaded {len(df):,} rows")
+        # Extract dates
+        df['block_date'] = df['block_time'].dt.date
+        df['week'] = df['block_time'].dt.isocalendar().apply(
+            lambda x: f"{x.year}_W{x.week:02d}", axis=1
+        )
+
+        # Convert numeric columns
+        numeric_cols = ['amount', 'amount_usd']
+        df = self.clean_numeric_columns(df, numeric_cols)
+
+        # Remove rows with missing critical data
+        df = df.dropna(subset=['block_time', 'blockchain', 'symbol'])
+
         return df
 
-    def calculate_kpi1_daily_activity(self, df: pd.DataFrame) -> pd.DataFrame:
-        """KPI 1: Daily Mint/Burn Activity"""
-        logger.info("Calculating Mint/Burn KPI 1: Daily Activity...")
+    def _classify_flows(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Classify transfers as mints or burns"""
+        df = df.copy()
 
-        kpi1 = df[[
-            'block_date', 'stablecoin', 'blockchain',
-            'mint_count', 'burn_count', 'net_mint_count',
-            'mint_volume', 'burn_volume', 'net_volume'
-        ]].copy()
+        null_address = "0x0000000000000000000000000000000000000000"
+        df['flow_type'] = 'transfer'  # Default
+        df.loc[df['from'].str.lower() == null_address.lower(), 'flow_type'] = 'mint'
+        df.loc[df['to'].str.lower() == null_address.lower(), 'flow_type'] = 'burn'
 
-        kpi1 = kpi1.sort_values(['block_date', 'net_volume'], ascending=[False, False])
+        return df
 
-        self.kpis['mintburn_kpi1_daily_activity'] = kpi1
-        logger.info(f"✓ Mint/Burn KPI 1 calculated: {len(kpi1):,} rows")
+    def _kpi1_daily_flows(self, df: pd.DataFrame) -> pd.DataFrame:
+        """KPI 2.1 & 2.2 & 2.3: Daily mint/burn counts and volumes"""
+        # Filter for mints and burns only
+        flows = df[df['flow_type'].isin(['mint', 'burn'])].copy()
 
-        return kpi1
-
-    def calculate_kpi2_weekly_aggregates(self, df: pd.DataFrame) -> pd.DataFrame:
-        """KPI 2: Weekly Aggregated Mint/Burn"""
-        logger.info("Calculating Mint/Burn KPI 2: Weekly Aggregates...")
-
-        df_weekly = df.copy()
-        df_weekly['week'] = pd.to_datetime(df_weekly['block_date']).dt.to_period('W').dt.start_time
-
-        kpi2 = df_weekly.groupby(['week', 'stablecoin', 'blockchain']).agg({
-            'mint_count': 'sum',
-            'burn_count': 'sum',
-            'mint_volume': 'sum',
-            'burn_volume': 'sum',
-            'net_volume': 'sum'
+        kpi = flows.groupby(['block_date', 'blockchain', 'symbol', 'flow_type']).agg({
+            'tx_hash': 'count',  # Transaction count
+            'amount_usd': 'sum'  # Volume
         }).reset_index()
 
-        kpi2 = kpi2.sort_values(['week', 'net_volume'], ascending=[False, False])
+        # Pivot to separate mint/burn
+        kpi = kpi.pivot_table(
+            index=['block_date', 'blockchain', 'symbol'],
+            columns='flow_type',
+            values=['tx_hash', 'amount_usd'],
+            fill_value=0
+        ).reset_index()
 
-        self.kpis['mintburn_kpi2_weekly_aggregates'] = kpi2
-        logger.info(f"✓ Mint/Burn KPI 2 calculated: {len(kpi2):,} rows")
+        # Flatten multi-level columns
+        kpi.columns = [f"{col[0]}_{col[1]}" if col[1] else col[0] for col in kpi.columns.values]
 
-        return kpi2
+        # Calculate net
+        kpi['net_volume_usd'] = kpi['amount_usd_mint'] - kpi['amount_usd_burn']
 
-    def calculate_kpi3_net_issuance(self, kpi2: pd.DataFrame) -> pd.DataFrame:
-        """KPI 3: Net Issuance by Token"""
-        logger.info("Calculating Mint/Burn KPI 3: Net Issuance...")
+        return kpi
 
-        kpi3 = kpi2.groupby(['week', 'stablecoin']).agg({
-            'mint_volume': 'sum',
-            'burn_volume': 'sum',
-            'net_volume': 'sum'
+    def _kpi2_weekly_aggregates(self, df: pd.DataFrame) -> pd.DataFrame:
+        """KPI 2.3 & 2.4: Weekly aggregated flows"""
+        flows = df[df['flow_type'].isin(['mint', 'burn'])].copy()
+
+        kpi = flows.groupby(['week', 'blockchain', 'symbol', 'flow_type']).agg({
+            'amount_usd': 'sum',
+            'tx_hash': 'count'
         }).reset_index()
 
-        kpi3.rename(columns={
-            'mint_volume': 'total_mints',
-            'burn_volume': 'total_burns',
-            'net_volume': 'net_issuance'
-        }, inplace=True)
+        # Pivot
+        kpi = kpi.pivot_table(
+            index=['week', 'blockchain', 'symbol'],
+            columns='flow_type',
+            values=['amount_usd', 'tx_hash'],
+            fill_value=0
+        ).reset_index()
 
-        # Add trend classification
-        kpi3['trend'] = kpi3['net_issuance'].apply(
+        # Flatten columns
+        kpi.columns = [f"{col[0]}_{col[1]}" if col[1] else col[0] for col in kpi.columns.values]
+
+        kpi['net_volume_usd'] = kpi['amount_usd_mint'] - kpi['amount_usd_burn']
+
+        return kpi
+
+    def _kpi3_net_issuance(self, df: pd.DataFrame) -> pd.DataFrame:
+        """KPI 2.4: Net issuance trend (expansion/contraction)"""
+        flows = df[df['flow_type'].isin(['mint', 'burn'])].copy()
+
+        kpi = flows.groupby(['week', 'symbol']).agg({
+            'flow_type': lambda x: (x == 'mint').sum() - (x == 'burn').sum(),
+            'amount_usd': lambda x: x[flows.loc[x.index, 'flow_type'] == 'mint'].sum() -
+                                    x[flows.loc[x.index, 'flow_type'] == 'burn'].sum()
+        }).reset_index()
+
+        kpi.columns = ['week', 'symbol', 'net_transaction_count', 'net_issuance_usd']
+        kpi['trend'] = kpi['net_issuance_usd'].apply(
             lambda x: 'EXPANSION' if x > 0 else 'CONTRACTION' if x < 0 else 'NEUTRAL'
         )
 
-        kpi3 = kpi3.sort_values(['week', 'net_issuance'], ascending=[False, False])
+        return kpi
 
-        self.kpis['mintburn_kpi3_net_issuance'] = kpi3
-        logger.info(f"✓ Mint/Burn KPI 3 calculated: {len(kpi3):,} rows")
-
-        return kpi3
-
-    def calculate_kpi4_wow_change(self, kpi2: pd.DataFrame) -> pd.DataFrame:
-        """KPI 4: Week-over-Week Activity Change"""
-        logger.info("Calculating Mint/Burn KPI 4: WoW Change...")
-
-        kpi4 = kpi2.copy()
-        kpi4 = kpi4.sort_values(['stablecoin', 'blockchain', 'week'])
+    def _kpi4_wow_change(self, df: pd.DataFrame) -> pd.DataFrame:
+        """KPI 2.5: Week-over-week activity change"""
+        # Get weekly totals
+        weekly = self._kpi2_weekly_aggregates(df)
 
         # Calculate WoW change
-        kpi4['mint_volume_wow_pct'] = (
-                kpi4.groupby(['stablecoin', 'blockchain'])['mint_volume']
-                .pct_change() * 100
-        )
+        weekly = weekly.sort_values(['symbol', 'week'])
 
-        kpi4['burn_volume_wow_pct'] = (
-                kpi4.groupby(['stablecoin', 'blockchain'])['burn_volume']
-                .pct_change() * 100
-        )
+        # Group by symbol to calculate WoW
+        weekly['mint_volume_prev_week'] = weekly.groupby('symbol')['amount_usd_mint'].shift(1)
+        weekly['mint_volume_wow_pct'] = (
+                (weekly['amount_usd_mint'] - weekly['mint_volume_prev_week']) /
+                weekly['mint_volume_prev_week'] * 100
+        ).round(2)
 
-        kpi4['net_volume_wow_pct'] = (
-                kpi4.groupby(['stablecoin', 'blockchain'])['net_volume']
-                .pct_change() * 100
-        )
+        weekly['burn_volume_prev_week'] = weekly.groupby('symbol')['amount_usd_burn'].shift(1)
+        weekly['burn_volume_wow_pct'] = (
+                (weekly['amount_usd_burn'] - weekly['burn_volume_prev_week']) /
+                weekly['burn_volume_prev_week'] * 100
+        ).round(2)
 
-        kpi4 = kpi4.sort_values(['week', 'mint_volume_wow_pct'], ascending=[False, False])
-
-        self.kpis['mintburn_kpi4_wow_change'] = kpi4
-        logger.info(f"✓ Mint/Burn KPI 4 calculated: {len(kpi4):,} rows")
-
-        return kpi4
-
-    def process_all(self, df: pd.DataFrame) -> Dict[str, pd.DataFrame]:
-        """
-        Process all mint/burn KPIs
-
-        Args:
-            df: Raw mint/burn data
-
-        Returns:
-            Dictionary of KPI DataFrames
-        """
-        logger.info("=" * 80)
-        logger.info("PROCESSING MINT/BURN KPIs")
-        logger.info("=" * 80)
-
-        # Clean data
-        df_clean = self.load_raw_data(df)
-
-        # Calculate KPIs
-        self.calculate_kpi1_daily_activity(df_clean)
-        kpi2 = self.calculate_kpi2_weekly_aggregates(df_clean)
-        self.calculate_kpi3_net_issuance(kpi2)
-        self.calculate_kpi4_wow_change(kpi2)
-
-        logger.info("\n✅ All Mint/Burn KPIs calculated successfully")
-        return self.kpis
-
-    def export_kpis(self, timestamp: str = None) -> Dict[str, Path]:
-        """Export KPIs to CSV with week in filename"""
-        if timestamp is None:
-            from datetime import datetime
-            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-
-        logger.info("Exporting KPI CSVs...")
-        exported = {}
-
-        for kpi_name, kpi_df in self.kpis.items():
-            # Extract week from the data
-            if 'week' in kpi_df.columns:
-                latest_week = kpi_df['week'].max()
-                week_str = latest_week.strftime('%Y_W%W')  # e.g., 2025_W52
-                filename = f"{kpi_name}_{week_str}_{timestamp}.csv"
-            else:
-                filename = f"{kpi_name}_{timestamp}.csv"
-
-            filepath = self.kpi_dir / filename
-            kpi_df.to_csv(filepath, index=False)
-            exported[kpi_name] = filepath
-            logger.info(f"✓ {filepath}")
-
-        logger.info(f"✓ Exported {len(exported)} KPI files")
-        return exported
-
+        return weekly[['week', 'symbol', 'blockchain', 'mint_volume_wow_pct', 'burn_volume_wow_pct']]

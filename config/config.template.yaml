@@ -1,0 +1,285 @@
+# ============================================================================
+# LATAM Stablecoin Weekly Report Pipeline - Configuration Template
+# ============================================================================
+# Instructions:
+# 1. Copy this file to 'config.yaml'
+# 2. Fill in your actual values (API keys, query IDs)
+# 3. Never commit config.yaml to git (it's in .gitignore)
+# ============================================================================
+
+# ============================================================================
+# Dune Analytics Configuration
+# ============================================================================
+dune:
+  # API Key (loaded from environment variable)
+  # Set as: export DUNE_API_KEY="your_key_here"
+  api_key: ${DUNE_API_KEY}
+
+  # Query IDs for data extraction
+  # TODO: Replace with your actual Dune query IDs
+  query_ids:
+    flows: YOUR_FLOWS_QUERY_ID_HERE      # tokens.transfers query
+    dex: YOUR_DEX_QUERY_ID_HERE          # dex.trades query
+
+  # Execution settings
+  execution:
+    max_retries: 3
+    retry_delay_seconds: 30
+    timeout_seconds: 120
+    poll_interval_seconds: 5
+
+  # Performance settings
+  performance:
+    lookback_days: 14                    # 14 days = 2 weeks (perfect for WoW)
+    use_fresh_execution: true            # Execute fresh queries (not cached)
+    min_trade_size_usd: 1.0             # Filter dust trades
+
+# ============================================================================
+# Token Configuration
+# ============================================================================
+tokens:
+  # List of tracked LATAM stablecoins
+  tracked_tokens:
+    # BBRL - Brazilian Real Stablecoin
+    - blockchain: bnb
+      contract_address: "0xb6bb22f4d1e58e9e43efa2ec7f572d215b3cf08a"
+      symbol: BBRL
+      decimals: 18
+      currency: BRL
+      description: "Brazilian Real stablecoin on BNB Chain"
+
+    # BRL1 - Brazilian Real Stablecoin
+    - blockchain: polygon
+      contract_address: "0x5c067c80c00ecd2345b05e83a3e758ef799c40b5"
+      symbol: BRL1
+      decimals: 18
+      currency: BRL
+      description: "Brazilian Real stablecoin on Polygon"
+
+    # BRLA - Brazilian Real Stablecoin (multi-chain)
+    - blockchain: celo
+      contract_address: "0xfecb3f7c54e2caae9dc6ac9060a822d47e053760"
+      symbol: BRLA
+      decimals: 18
+      currency: BRL
+      description: "Brazilian Real stablecoin on Celo"
+
+    - blockchain: polygon
+      contract_address: "0xe6a537a407488807f0bbeb0038b79004f19dddfb"
+      symbol: BRLA
+      decimals: 18
+      currency: BRL
+      description: "Brazilian Real stablecoin on Polygon"
+
+    - blockchain: gnosis
+      contract_address: "0xfecb3f7c54e2caae9dc6ac9060a822d47e053760"
+      symbol: BRLA
+      decimals: 18
+      currency: BRL
+      description: "Brazilian Real stablecoin on Gnosis"
+
+    # BRZ - Brazilian Real Stablecoin (multi-chain)
+    - blockchain: gnosis
+      contract_address: "0x0a06c8354a6cc1a07549a38701eac205942e3ac6"
+      symbol: BRZ
+      decimals: 18
+      currency: BRL
+      description: "Brazilian Real stablecoin on Gnosis"
+
+    - blockchain: polygon
+      contract_address: "0x4ed141110f6eeeaba9a1df36d8c26f684d2475dc"
+      symbol: BRZ
+      decimals: 18
+      currency: BRL
+      description: "Brazilian Real stablecoin on Polygon"
+
+    - blockchain: base
+      contract_address: "0xe9185ee218cae427af7b9764a011bb89fea761b4"
+      symbol: BRZ
+      decimals: 18
+      currency: BRL
+      description: "Brazilian Real stablecoin on Base"
+
+    - blockchain: unichain
+      contract_address: "0xe9185ee218cae427af7b9764a011bb89fea761b4"
+      symbol: BRZ
+      decimals: 18
+      currency: BRL
+      description: "Brazilian Real stablecoin on Unichain"
+
+    # COPM - Colombian Peso Stablecoin
+    - blockchain: polygon
+      contract_address: "0x12050c705152931cfee3dd56c52fb09dea816c23"
+      symbol: COPM
+      decimals: 18
+      currency: COP
+      description: "Colombian Peso stablecoin on Polygon"
+
+    # MXNe - Mexican Peso Stablecoin
+    - blockchain: base
+      contract_address: "0x269cae7dc59803e5c596c95756faeebb6030e0af"
+      symbol: MXNe
+      decimals: 6
+      currency: MXN
+      description: "Mexican Peso stablecoin on Base"
+
+    # nARS - Argentine Peso Stablecoin
+    - blockchain: base
+      contract_address: "0x5e40f26e89213660514c51fb61b2d357dbf63c85"
+      symbol: nARS
+      decimals: 18
+      currency: ARS
+      description: "Argentine Peso stablecoin on Base"
+
+  # Processing rules
+  processing_rules:
+    zero_address: "0x0000000000000000000000000000000000000000"
+    exclude_chains: []
+    exclude_tokens: []
+    filter_mints_burns_only: false
+
+# ============================================================================
+# Output Directory Configuration
+# ============================================================================
+output:
+  base_dir: ./data
+  raw_data_dir: ./data/raw
+  kpi_dir: ./data/kpi
+  reports_dir: ./data/reports
+  logs_dir: ./logs
+
+# ============================================================================
+# Processing Configuration
+# ============================================================================
+processing:
+  lookback_days: 14
+  min_trade_size_usd: 1.0
+  exclude_zero_values: true
+
+  growth_thresholds:
+    high_growth: 10
+    moderate_growth: 2
+    stable: 2
+    moderate_decline: -10
+    high_decline: -10
+
+  volatility_thresholds:
+    stable: 0.1
+    low: 1.0
+    moderate: 5.0
+    high: 5.0
+
+  depeg_thresholds:
+    minor: 1.0
+    moderate: 2.0
+    severe: 5.0
+
+# ============================================================================
+# Reporting Configuration
+# ============================================================================
+reporting:
+  report_type: "weekly"
+  week_format: "%Y-W%V"
+  date_format: "%Y-%m-%d"
+  top_n_tokens: 15
+  top_n_chains: 10
+  include_zero_supply: false
+  include_inactive_tokens: false
+  generate_json: true
+  generate_csv: false
+  generate_html: false
+  show_progress: true
+  verbose: false
+  print_linkedin_metrics: true
+
+# ============================================================================
+# Logging Configuration
+# ============================================================================
+logging:
+  level: INFO
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  date_format: "%Y-%m-%d %H:%M:%S"
+  max_file_size_mb: 10
+  backup_count: 5
+  encoding: utf-8
+  console_level: WARNING
+  file_level: DEBUG
+
+# ============================================================================
+# Domain-Specific Configuration
+# ============================================================================
+domains:
+  supply:
+    enabled: true
+    kpis:
+      - kpi1_weekly_supply
+      - kpi2_supply_by_chain
+      - kpi3_total_supply
+      - kpi4_growth_rate
+
+  flows:
+    enabled: true
+    kpis:
+      - kpi1_daily_activity
+      - kpi2_weekly_aggregates
+      - kpi3_net_issuance
+      - kpi4_wow_change
+
+  dex:
+    enabled: true
+    kpis:
+      - kpi1_daily_volume
+      - kpi2_weekly_volume
+      - kpi3_token_breakdown
+      - kpi4_wow_volume_change
+      - kpi5_chain_distribution
+
+# ============================================================================
+# Metadata
+# ============================================================================
+metadata:
+  pipeline_version: "3.0"
+  pipeline_name: "LATAM Stablecoin Weekly Report"
+  author: "LATAM Stablecoin Monitor Team"
+  last_updated: "2026-01-06"
+  description: |
+    Automated pipeline for tracking LATAM stablecoin metrics across
+    3 domains: Supply, Flows (Mint/Burn), and DEX Volume.
+
+  currencies:
+    BRL:
+      name: "Brazilian Real"
+      fiat_code: "BRL"
+      tokens: ["BBRL", "BRL1", "BRLA", "BRZ"]
+    COP:
+      name: "Colombian Peso"
+      fiat_code: "COP"
+      tokens: ["COPM"]
+    MXN:
+      name: "Mexican Peso"
+      fiat_code: "MXN"
+      tokens: ["MXNe"]
+    ARS:
+      name: "Argentine Peso"
+      fiat_code: "ARS"
+      tokens: ["nARS"]
+
+  blockchains:
+    bnb:
+      name: "BNB Chain"
+      explorer: "https://bscscan.com"
+    polygon:
+      name: "Polygon"
+      explorer: "https://polygonscan.com"
+    celo:
+      name: "Celo"
+      explorer: "https://celoscan.io"
+    gnosis:
+      name: "Gnosis Chain"
+      explorer: "https://gnosisscan.io"
+    base:
+      name: "Base"
+      explorer: "https://basescan.org"
+    unichain:
+      name: "Unichain"
+      explorer: "https://uniscan.xyz"

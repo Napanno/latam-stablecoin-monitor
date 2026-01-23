@@ -1,711 +1,370 @@
 """
-Minimal reporters for LinkedIn-style output across all domains.
-
-Generates compact metrics ready for weekly carousel posts.
-
-Domains covered:
-1. Supply (on-chain circulating supply)
-2. Mint/Burn (issuance/redemption activity)
-3. DEX Volume (trading activity)
-4. Depeg Monitoring (price stability)
-
-Author: LATAM Stablecoin Team
-Date: 2025-12-29
-Version: 2.1.0 - DEPEG OPTIONAL
+Report Generator for LATAM Stablecoin Weekly Report v3.0
+Generates consolidated JSON reports from processed KPI data across 3 domains
 """
 
-import pandas as pd
-from typing import Dict, Optional
-from datetime import datetime
-from pathlib import Path
-import yaml
 import json
-from utils.logger import setup_logger
+import pandas as pd
+from pathlib import Path
+from datetime import datetime
+from utils.logger import get_logger
 
-logger = setup_logger(__name__)
+logger = get_logger(__name__)
 
 
-# ============================================================================
-# 1. SUPPLY REPORTER
-# ============================================================================
-
-class MinimalSupplyReporter:
-    """Generate compact supply metrics for weekly LinkedIn content."""
-
-    def __init__(self, config_path: str = 'config.yaml'):
-        """
-        Initialize reporter with config
-
-        Args:
-            config_path: Path to config.yaml
-        """
-        with open(config_path, 'r') as f:
-            self.config = yaml.safe_load(f)
-
-        self.week_format = self.config['reporting']['week_format']
-        self.date_format = self.config['reporting']['date_format']
-        self.top_n = self.config['reporting']['top_n_tokens']
-        self.timestamp = datetime.now()
-
-    def load_kpis(self, kpi_data: Dict[str, pd.DataFrame]) -> None:
-        """
-        Load KPI data from processing step
-
-        Expected keys from SupplyKPIProcessor:
-        - 'kpi1_weekly_supply'
-        - 'kpi3_total_supply'
-        - 'kpi4_growth_rate'
-
-        Args:
-            kpi_data: Dictionary of KPI DataFrames
-        """
-        self.kpis = kpi_data
-        logger.info(f"Loaded {len(kpi_data)} Supply KPI datasets for minimal reporting")
-
-    def build_metric_dict(self) -> Dict:
-        """
-        Build a small dictionary of metrics for LinkedIn post
-
-        Returns:
-            Dictionary with simple numeric/text values ready for carousel
-        """
-        kpi1 = self.kpis['kpi1_weekly_supply']
-        kpi3 = self.kpis['kpi3_total_supply']
-
-        latest_week = kpi1['week'].max()
-        latest_kpi1 = kpi1[kpi1['week'] == latest_week]
-        latest_kpi3 = kpi3[kpi3['week'] == latest_week]
-
-        # Total LATAM supply (all tokens, all chains)
-        total_latam_supply = float(latest_kpi3['total_supply_all_chains'].sum())
-
-        # Week-over-week growth rate
-        previous_week = sorted(kpi3['week'].unique())
-        previous_week = previous_week[-2] if len(previous_week) >= 2 else None
-
-        if previous_week is not None:
-            previous_total = float(kpi3[kpi3['week'] == previous_week]['total_supply_all_chains'].sum())
-            if previous_total > 0:
-                supply_growth_wow = ((total_latam_supply - previous_total) / previous_total) * 100
-            else:
-                supply_growth_wow = 0.0
-        else:
-            supply_growth_wow = 0.0
-
-        # Top tokens by total supply
-        top_tokens = (
-            latest_kpi3
-            .sort_values('total_supply_all_chains', ascending=False)
-            .head(self.top_n)
-            [['stablecoin', 'total_supply_all_chains', 'market_share_pct']]
-        )
-
-        top_tokens_list = [
-            {
-                'stablecoin': row['stablecoin'],
-                'supply': float(row['total_supply_all_chains']),
-                'market_share_pct': float(row['market_share_pct'])
-            }
-            for _, row in top_tokens.iterrows()
-        ]
-
-        # Top chains by supply (using kpi1)
-        chain_supply = (
-            latest_kpi1.groupby('blockchain')['circulating_supply_tokens']
-            .sum()
-            .reset_index()
-            .sort_values('circulating_supply_tokens', ascending=False)
-        )
-
-        top_chains_list = [
-            {
-                'blockchain': row['blockchain'],
-                'supply': float(row['circulating_supply_tokens'])
-            }
-            for _, row in chain_supply.head(5).iterrows()
-        ]
-
-        metrics = {
-            'week_label': latest_week.strftime(self.week_format),
-            'week_date': latest_week.strftime(self.date_format),
-            'total_latam_supply_tokens': total_latam_supply,
-            'supply_growth_wow_pct': supply_growth_wow,
-            'top_tokens_by_supply': top_tokens_list,
-            'top_chains_by_supply': top_chains_list,
-        }
-
-        return metrics
-
-    def print_for_linkedin(self, metrics: Dict) -> None:
-        """
-        Print ultra-compact lines for LinkedIn carousel template
-
-        Args:
-            metrics: Dictionary of calculated metrics
-        """
-        print("\n" + "=" * 65)
-        print("LINKEDIN CAROUSEL METRICS - SUPPLY")
-        print("=" * 65 + "\n")
-
-        print(f"Week: {metrics['week_label']} ({metrics['week_date']})")
-        print(f"Total LATAM stablecoins on-chain supply = {metrics['total_latam_supply_tokens']:,.0f} tokens")
-        print(f"Week-over-week supply growth = {metrics['supply_growth_wow_pct']:+.1f}%")
-        print("")
-
-        print("Top tokens by on-chain supply:")
-        for item in metrics['top_tokens_by_supply']:
-            print(f"  - {item['stablecoin']}: {item['supply']:,.0f} tokens "
-                  f"({item['market_share_pct']:.1f}% of LATAM supply)")
-
-        print("")
-        print("Top chains by stablecoin supply:")
-        for item in metrics['top_chains_by_supply']:
-            print(f"  - {item['blockchain']}: {item['supply']:,.0f} tokens")
-
-        print("\n" + "=" * 65 + "\n")
-
-    def generate_minimal_report(self, kpi_data: Dict[str, pd.DataFrame]) -> Dict:
-        """
-        Main entrypoint: build metrics + print minimal text
-
-        Args:
-            kpi_data: Dictionary of KPI DataFrames from processor
-
-        Returns:
-            Dictionary with domain and metrics for consolidation
-        """
-        self.load_kpis(kpi_data)
-        metrics = self.build_metric_dict()
-        self.print_for_linkedin(metrics)
-
-        return {'domain': 'supply', 'metrics': metrics}
-
-
-# ============================================================================
-# 2. MINT/BURN REPORTER
-# ============================================================================
-
-class MinimalMintBurnReporter:
-    """Generate compact mint/burn metrics for weekly content."""
-
-    def __init__(self, config_path: str = 'config.yaml'):
-        """
-        Initialize reporter with config
-
-        Args:
-            config_path: Path to config.yaml
-        """
-        with open(config_path, 'r') as f:
-            self.config = yaml.safe_load(f)
-
-        self.week_format = self.config['reporting']['week_format']
-        self.date_format = self.config['reporting']['date_format']
-        self.top_n = self.config['reporting']['top_n_tokens']
-        self.timestamp = datetime.now()
-
-    def load_kpis(self, kpi_data: Dict[str, pd.DataFrame]) -> None:
-        """
-        Load KPI data from MintBurnKPIProcessor
-
-        Expected keys:
-        - 'mintburn_kpi2_weekly_aggregates'
-        - 'mintburn_kpi3_net_issuance'
-
-        Args:
-            kpi_data: Dictionary of KPI DataFrames
-        """
-        self.kpis = kpi_data
-        logger.info(f"Loaded {len(kpi_data)} Mint/Burn KPI datasets for minimal reporting")
-
-    def build_metric_dict(self) -> Dict:
-        """
-        Build mint/burn metrics for LinkedIn
-
-        Returns:
-            Dictionary with mint/burn metrics
-        """
-        kpi2 = self.kpis['mintburn_kpi2_weekly_aggregates']
-        kpi3 = self.kpis['mintburn_kpi3_net_issuance']
-
-        latest_week = kpi2['week'].max()
-        latest_kpi2 = kpi2[kpi2['week'] == latest_week]
-        latest_kpi3 = kpi3[kpi3['week'] == latest_week]
-
-        # Total net issuance across all tokens
-        total_net_issuance = float(latest_kpi3['net_issuance'].sum())
-
-        # Top expansion / contraction tokens
-        top_expansion = (
-            latest_kpi3
-            .sort_values('net_issuance', ascending=False)
-            .head(self.top_n)
-        )
-
-        top_contraction = (
-            latest_kpi3
-            .sort_values('net_issuance', ascending=True)
-            .head(self.top_n)
-        )
-
-        expansion_list = [
-            {
-                'stablecoin': row['stablecoin'],
-                'net_issuance': float(row['net_issuance'])
-            }
-            for _, row in top_expansion.iterrows() if row['net_issuance'] > 0
-        ]
-
-        contraction_list = [
-            {
-                'stablecoin': row['stablecoin'],
-                'net_issuance': float(row['net_issuance'])
-            }
-            for _, row in top_contraction.iterrows() if row['net_issuance'] < 0
-        ]
-
-        metrics = {
-            'week_label': latest_week.strftime(self.week_format),
-            'week_date': latest_week.strftime(self.date_format),
-            'total_net_issuance_tokens': total_net_issuance,
-            'top_expansion_tokens': expansion_list,
-            'top_contraction_tokens': contraction_list
-        }
-
-        return metrics
-
-    def print_for_linkedin(self, metrics: Dict) -> None:
-        """
-        Print mint/burn metrics for LinkedIn
-
-        Args:
-            metrics: Dictionary of calculated metrics
-        """
-        print("\n" + "=" * 65)
-        print("LINKEDIN CAROUSEL METRICS - MINT/BURN")
-        print("=" * 65 + "\n")
-
-        print(f"Week: {metrics['week_label']} ({metrics['week_date']})")
-        print(f"Net on-chain issuance (mints - burns) = {metrics['total_net_issuance_tokens']:+,.0f} tokens")
-        print("")
-
-        if metrics['top_expansion_tokens']:
-            print("Top expansion (net mints):")
-            for item in metrics['top_expansion_tokens']:
-                print(f"  - {item['stablecoin']}: +{item['net_issuance']:,.0f} tokens")
-
-        if metrics['top_contraction_tokens']:
-            print("\nTop contraction (net burns):")
-            for item in metrics['top_contraction_tokens']:
-                print(f"  - {item['stablecoin']}: {item['net_issuance']:,.0f} tokens")
-
-        print("\n" + "=" * 65 + "\n")
-
-    def generate_minimal_report(self, kpi_data: Dict[str, pd.DataFrame]) -> Dict:
-        """
-        Main entrypoint: build metrics + print minimal text
-
-        Args:
-            kpi_data: Dictionary of KPI DataFrames from processor
-
-        Returns:
-            Dictionary with domain and metrics for consolidation
-        """
-        self.load_kpis(kpi_data)
-        metrics = self.build_metric_dict()
-        self.print_for_linkedin(metrics)
-
-        return {'domain': 'mint_burn', 'metrics': metrics}
-
-
-# ============================================================================
-# 3. DEX VOLUME REPORTER
-# ============================================================================
-
-class MinimalDexReporter:
-    """Generate compact DEX volume metrics for weekly content."""
-
-    def __init__(self, config_path: str = 'config.yaml'):
-        """
-        Initialize reporter with config
-
-        Args:
-            config_path: Path to config.yaml
-        """
-        with open(config_path, 'r') as f:
-            self.config = yaml.safe_load(f)
-
-        self.week_format = self.config['reporting']['week_format']
-        self.date_format = self.config['reporting']['date_format']
-        self.top_n = self.config['reporting']['top_n_tokens']
-        self.timestamp = datetime.now()
-
-    def load_kpis(self, kpi_data: Dict[str, pd.DataFrame]) -> None:
-        """
-        Load KPI data from DexVolumeKPIProcessor
-
-        Expected keys:
-        - 'dex_kpi2_weekly_volume'
-        - 'dex_kpi3_token_breakdown'
-        - 'dex_kpi4_wow_volume_change'
-
-        Args:
-            kpi_data: Dictionary of KPI DataFrames
-        """
-        self.kpis = kpi_data
-        logger.info(f"Loaded {len(kpi_data)} DEX KPI datasets for minimal reporting")
-
-    def build_metric_dict(self) -> Dict:
-        """
-        Build DEX volume metrics for LinkedIn
-
-        Returns:
-            Dictionary with DEX metrics
-        """
-        kpi2 = self.kpis['dex_kpi2_weekly_volume']
-        kpi3 = self.kpis['dex_kpi3_token_breakdown']
-        kpi4 = self.kpis['dex_kpi4_wow_volume_change']
-
-        latest_week = kpi2['week'].max()
-        latest_kpi2 = kpi2[kpi2['week'] == latest_week]
-        latest_kpi3 = kpi3[kpi3['week'] == latest_week]
-        latest_kpi4 = kpi4[kpi4['week'] == latest_week]
-
-        # Total DEX volume across all tokens
-        total_volume = float(latest_kpi2['volume_usd'].sum())
-
-        # Top tokens by DEX volume
-        top_tokens = (
-            latest_kpi3
-            .sort_values('total_volume_usd', ascending=False)
-            .head(self.top_n)
-        )
-
-        top_tokens_list = [
-            {
-                'stablecoin': row['stablecoin'],
-                'volume_usd': float(row['total_volume_usd']),
-                'market_share_pct': float(row['market_share_pct'])
-            }
-            for _, row in top_tokens.iterrows()
-        ]
-
-        # Biggest WoW movers by volume (absolute %)
-        movers = latest_kpi4.copy()
-        movers['abs_volume_wow_pct'] = movers['volume_wow_pct'].abs()
-        top_movers = (
-            movers
-            .dropna(subset=['volume_wow_pct'])
-            .sort_values('abs_volume_wow_pct', ascending=False)
-            .head(self.top_n)
-        )
-
-        movers_list = [
-            {
-                'stablecoin': row['stablecoin'],
-                'blockchain': row['blockchain'],
-                'volume_wow_pct': float(row['volume_wow_pct'])
-            }
-            for _, row in top_movers.iterrows()
-        ]
-
-        metrics = {
-            'week_label': latest_week.strftime(self.week_format),
-            'week_date': latest_week.strftime(self.date_format),
-            'total_dex_volume_usd': total_volume,
-            'top_tokens_by_dex_volume': top_tokens_list,
-            'top_volume_movers': movers_list
-        }
-
-        return metrics
-
-    def print_for_linkedin(self, metrics: Dict) -> None:
-        """
-        Print DEX volume metrics for LinkedIn
-
-        Args:
-            metrics: Dictionary of calculated metrics
-        """
-        print("\n" + "=" * 65)
-        print("LINKEDIN CAROUSEL METRICS - DEX VOLUME")
-        print("=" * 65 + "\n")
-
-        print(f"Week: {metrics['week_label']} ({metrics['week_date']})")
-        print(f"Total LATAM stablecoin DEX volume = ${metrics['total_dex_volume_usd']:,.0f}")
-        print("")
-
-        print("Top tokens by DEX volume:")
-        for item in metrics['top_tokens_by_dex_volume']:
-            print(f"  - {item['stablecoin']}: ${item['volume_usd']:,.0f} "
-                  f"({item['market_share_pct']:.1f}% of LATAM DEX volume)")
-
-        if metrics['top_volume_movers']:
-            print("\nBiggest WoW movers by DEX volume:")
-            for item in metrics['top_volume_movers']:
-                sign = "+" if item['volume_wow_pct'] > 0 else ""
-                print(f"  - {item['stablecoin']} on {item['blockchain']}: "
-                      f"{sign}{item['volume_wow_pct']:.1f}% vs last week")
-
-        print("\n" + "=" * 65 + "\n")
-
-    def generate_minimal_report(self, kpi_data: Dict[str, pd.DataFrame]) -> Dict:
-        """
-        Main entrypoint: build metrics + print minimal text
-
-        Args:
-            kpi_data: Dictionary of KPI DataFrames from processor
-
-        Returns:
-            Dictionary with domain and metrics for consolidation
-        """
-        self.load_kpis(kpi_data)
-        metrics = self.build_metric_dict()
-        self.print_for_linkedin(metrics)
-
-        return {'domain': 'dex_volume', 'metrics': metrics}
-
-
-# ============================================================================
-# 4. DEPEG MONITORING REPORTER
-# ============================================================================
-
-class MinimalDepegReporter:
-    """Generate compact depeg/stability metrics for weekly content."""
-
-    def __init__(self, config_path: str = 'config.yaml'):
-        """
-        Initialize reporter with config
-
-        Args:
-            config_path: Path to config.yaml
-        """
-        with open(config_path, 'r') as f:
-            self.config = yaml.safe_load(f)
-
-        self.date_format = self.config['reporting']['date_format']
-        self.top_n = self.config['reporting']['top_n_tokens']
-        self.timestamp = datetime.now()
-
-    def load_kpis(self, kpi_data: Dict[str, pd.DataFrame]) -> None:
-        """
-        Load KPI data from DepegKPIProcessor
-
-        Expected keys:
-        - 'depeg_kpi2_volatility'
-        - 'depeg_kpi3_depeg_events'
-        - 'depeg_kpi4_stability_summary'
-
-        Args:
-            kpi_data: Dictionary of KPI DataFrames
-        """
-        self.kpis = kpi_data
-        logger.info(f"Loaded {len(kpi_data)} Depeg KPI datasets for minimal reporting")
-
-    def build_metric_dict(self) -> Dict:
-        """
-        Build depeg/stability metrics for LinkedIn
-
-        Returns:
-            Dictionary with depeg metrics
-        """
-        kpi2 = self.kpis['depeg_kpi2_volatility']
-        kpi3 = self.kpis['depeg_kpi3_depeg_events']
-        kpi4 = self.kpis['depeg_kpi4_stability_summary']
-
-        latest_date = kpi2['price_date'].max()
-        latest_vol = kpi2[kpi2['price_date'] == latest_date]
-        latest_depeg = kpi3[kpi3['price_date'] == latest_date]
-        latest_stab = kpi4[kpi4['week'] == kpi4['week'].max()]
-
-        # Worst depeg today
-        worst_depeg = latest_depeg.sort_values('depeg_pct', ascending=False).head(self.top_n)
-        worst_list = [
-            {
-                'stablecoin': row['stablecoin'],
-                'blockchain': row['blockchain'],
-                'depeg_pct': float(row['depeg_pct']),
-                'severity': str(row['depeg_severity'])
-            }
-            for _, row in worst_depeg.iterrows() if row['depeg_pct'] > 0
-        ]
-
-        # Most volatile over 30d
-        most_volatile = latest_vol.sort_values('volatility_30d', ascending=False).head(self.top_n)
-        volatile_list = [
-            {
-                'stablecoin': row['stablecoin'],
-                'blockchain': row['blockchain'],
-                'volatility_30d': float(row['volatility_30d']),
-                'classification': row['volatility_classification']
-            }
-            for _, row in most_volatile.iterrows()
-        ]
-
-        # Overall stability snapshot (avg vol)
-        avg_vol = float(latest_stab['avg_volatility'].mean()) if len(latest_stab) > 0 else 0.0
-
-        metrics = {
-            'date_label': latest_date.strftime(self.date_format),
-            'avg_30d_volatility': avg_vol,
-            'worst_depegs': worst_list,
-            'most_volatile_tokens': volatile_list
-        }
-
-        return metrics
-
-    def print_for_linkedin(self, metrics: Dict) -> None:
-        """
-        Print depeg/stability metrics for LinkedIn
-
-        Args:
-            metrics: Dictionary of calculated metrics
-        """
-        print("\n" + "=" * 65)
-        print("LINKEDIN CAROUSEL METRICS - DEPEG/STABILITY")
-        print("=" * 65 + "\n")
-
-        print(f"Date: {metrics['date_label']}")
-        print(f"Average 30-day volatility across LATAM stablecoins = {metrics['avg_30d_volatility']:.4f}")
-        print("")
-
-        if metrics['worst_depegs']:
-            print("Worst depegs today (vs 1.0 peg):")
-            for item in metrics['worst_depegs']:
-                print(f"  - {item['stablecoin']} on {item['blockchain']}: "
-                      f"{item['depeg_pct']:.2f}% ({item['severity']})")
-
-        if metrics['most_volatile_tokens']:
-            print("\nMost volatile over the last 30 days:")
-            for item in metrics['most_volatile_tokens']:
-                print(f"  - {item['stablecoin']} on {item['blockchain']}: "
-                      f"vol={item['volatility_30d']:.4f} ({item['classification']})")
-
-        print("\n" + "=" * 65 + "\n")
-
-    def generate_minimal_report(self, kpi_data: Dict[str, pd.DataFrame]) -> Dict:
-        """
-        Main entrypoint: build metrics + print minimal text
-
-        Args:
-            kpi_data: Dictionary of KPI DataFrames from processor
-
-        Returns:
-            Dictionary with domain and metrics for consolidation
-        """
-        self.load_kpis(kpi_data)
-        metrics = self.build_metric_dict()
-        self.print_for_linkedin(metrics)
-
-        return {'domain': 'depeg', 'metrics': metrics}
-
-
-# ============================================================================
-# JSON CONSOLIDATOR - Merge all domains into one visualization-ready file
-# ============================================================================
-
-def consolidate_reports_to_json(
-        supply_report: Dict,
-        mintburn_report: Dict,
-        dex_report: Dict,
-        depeg_report: Optional[Dict] = None,  # Made optional with default None
-        output_dir: str = './data/reports'
-) -> Path:
+class ReportGenerator:
     """
-    Consolidate all domain reports into single JSON for AI visualization
+    Generates consolidated reports from KPI data across multiple domains
+
+    Features:
+    - Loads KPI CSVs from all 3 domains (Supply, Flows, DEX)
+    - Creates consolidated JSON report
+    - Generates executive summary metrics
+    - Handles missing data gracefully
+    """
+
+    def __init__(self, output_dir='./data/reports'):
+        """
+        Initialize report generator
+
+        Args:
+            output_dir (str): Directory for report output
+        """
+        self.output_dir = Path(output_dir)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        logger.info(f"ReportGenerator initialized: {self.output_dir}")
+
+    def generate_consolidated_report(self, supply_kpis, flows_kpis, dex_kpis, timestamp):
+        """
+        Generate consolidated JSON report from all domain KPIs
+
+        Args:
+            supply_kpis (dict): Dictionary of supply KPI file paths
+            flows_kpis (dict): Dictionary of flows KPI file paths
+            dex_kpis (dict): Dictionary of DEX KPI file paths
+            timestamp (str): Timestamp string for filename (YYYYMMDDHHMMSS)
+
+        Returns:
+            Path: Path to generated report file
+        """
+        logger.info("Starting consolidated report generation...")
+
+        # Load all KPI data
+        supply_data = self._load_domain_kpis(supply_kpis, 'Supply')
+        flows_data = self._load_domain_kpis(flows_kpis, 'Flows')
+        dex_data = self._load_domain_kpis(dex_kpis, 'DEX')
+
+        # Extract week from data (assuming all KPIs have 'week' column)
+        week = self._extract_week(supply_data, flows_data, dex_data)
+
+        # Build executive summary
+        executive_summary = self._build_executive_summary(supply_data, flows_data, dex_data)
+
+        # Build complete report structure
+        report_data = {
+            'report_metadata': {
+                'report_type': 'LATAM Stablecoin Weekly Report - Consolidated',
+                'report_version': '3.0',
+                'week': week,
+                'generated_at': datetime.now().isoformat(),
+                'timestamp': timestamp,
+                'domains_included': ['supply', 'flows', 'dex'],
+                'total_kpis': len(supply_kpis) + len(flows_kpis) + len(dex_kpis)
+            },
+            'executive_summary': executive_summary,
+            'domains': {
+                'supply': {
+                    'description': 'On-chain supply metrics (Domain 1)',
+                    'kpis': supply_data
+                },
+                'flows': {
+                    'description': 'Mint/Burn flow metrics (Domain 2)',
+                    'kpis': flows_data
+                },
+                'dex': {
+                    'description': 'DEX trading volume metrics (Domain 3)',
+                    'kpis': dex_data
+                }
+            }
+        }
+
+        # Generate filename
+        report_filename = self.output_dir / f"consolidated_report_{timestamp}.json"
+
+        # Save to JSON with pretty formatting
+        with open(report_filename, 'w', encoding='utf-8') as f:
+            json.dump(report_data, f, indent=2, ensure_ascii=False, default=str)
+
+        logger.info(f"✓ Consolidated report saved: {report_filename}")
+        logger.info(f"  - Week: {week}")
+        logger.info(f"  - Total KPIs: {len(supply_kpis) + len(flows_kpis) + len(dex_kpis)}")
+        logger.info(f"  - File size: {report_filename.stat().st_size / 1024:.1f} KB")
+
+        return report_filename
+
+    def _load_domain_kpis(self, kpi_dict, domain_name):
+        """
+        Load KPI data from file paths for a specific domain
+
+        Args:
+            kpi_dict (dict): Dictionary mapping KPI names to file paths
+            domain_name (str): Name of domain (for logging)
+
+        Returns:
+            dict: Dictionary with KPI data
+        """
+        domain_data = {}
+        loaded_count = 0
+        failed_count = 0
+
+        for kpi_name, file_path in kpi_dict.items():
+            try:
+                df = pd.read_csv(file_path)
+
+                # Convert DataFrame to list of dictionaries
+                domain_data[kpi_name] = {
+                    'row_count': len(df),
+                    'columns': list(df.columns),
+                    'data': df.to_dict(orient='records')
+                }
+
+                loaded_count += 1
+                logger.debug(f"✓ {domain_name} - {kpi_name}: {len(df)} rows, {len(df.columns)} cols")
+
+            except FileNotFoundError:
+                logger.warning(f"✗ {domain_name} - {kpi_name}: File not found at {file_path}")
+                domain_data[kpi_name] = {
+                    'row_count': 0,
+                    'columns': [],
+                    'data': [],
+                    'error': 'File not found'
+                }
+                failed_count += 1
+
+            except Exception as e:
+                logger.warning(f"✗ {domain_name} - {kpi_name}: Error loading - {str(e)}")
+                domain_data[kpi_name] = {
+                    'row_count': 0,
+                    'columns': [],
+                    'data': [],
+                    'error': str(e)
+                }
+                failed_count += 1
+
+        logger.info(f"  {domain_name}: {loaded_count} KPIs loaded, {failed_count} failed")
+        return domain_data
+
+    def _extract_week(self, supply_data, flows_data, dex_data):
+        """
+        Extract week identifier from KPI data
+
+        Args:
+            supply_data (dict): Supply KPI data
+            flows_data (dict): Flows KPI data
+            dex_data (dict): DEX KPI data
+
+        Returns:
+            str: Week identifier (e.g., '2026-W01') or 'Unknown'
+        """
+        # Try to find week in any KPI that has data
+        for domain_data in [supply_data, flows_data, dex_data]:
+            for kpi_name, kpi_info in domain_data.items():
+                if kpi_info.get('data') and len(kpi_info['data']) > 0:
+                    first_row = kpi_info['data'][0]
+                    if 'week' in first_row:
+                        return first_row['week']
+
+        # Fallback: generate current week
+        current_week = datetime.now().strftime('%Y-W%V')
+        logger.warning(f"Could not extract week from data, using current week: {current_week}")
+        return current_week
+
+    def _build_executive_summary(self, supply_data, flows_data, dex_data):
+        """
+        Build executive summary with key metrics
+
+        Args:
+            supply_data (dict): Supply KPI data
+            flows_data (dict): Flows KPI data
+            dex_data (dict): DEX KPI data
+
+        Returns:
+            dict: Executive summary metrics
+        """
+        summary = {
+            'supply_metrics': self._extract_supply_summary(supply_data),
+            'flows_metrics': self._extract_flows_summary(flows_data),
+            'dex_metrics': self._extract_dex_summary(dex_data)
+        }
+
+        return summary
+
+    def _extract_supply_summary(self, supply_data):
+        """Extract key supply metrics for executive summary"""
+        summary = {
+            'total_supply': None,
+            'supply_growth_wow': None,
+            'top_token': None,
+            'top_chain': None
+        }
+
+        try:
+            # Try to get total supply from KPI3 (total supply)
+            if 'supply_kpi3_total_supply' in supply_data:
+                kpi3_data = supply_data['supply_kpi3_total_supply']['data']
+                if kpi3_data:
+                    # Get latest week data
+                    latest = kpi3_data[-1]
+                    summary['total_supply'] = latest.get('total_supply_all_chains')
+                    summary['supply_growth_wow'] = latest.get('supply_growth_rate_pct')
+                    summary['top_token'] = latest.get('stablecoin')
+
+            # Try to get top chain from KPI2 (supply by chain)
+            if 'supply_kpi2_supply_by_chain' in supply_data:
+                kpi2_data = supply_data['supply_kpi2_supply_by_chain']['data']
+                if kpi2_data:
+                    # First entry should be largest
+                    summary['top_chain'] = kpi2_data[0].get('blockchain')
+
+        except Exception as e:
+            logger.debug(f"Could not extract supply summary: {e}")
+
+        return summary
+
+    def _extract_flows_summary(self, flows_data):
+        """Extract key flows metrics for executive summary"""
+        summary = {
+            'total_mints': None,
+            'total_burns': None,
+            'net_issuance': None,
+            'mint_count': None,
+            'burn_count': None
+        }
+
+        try:
+            # Try to get from KPI3 (net issuance)
+            if 'flows_kpi3_net_issuance' in flows_data:
+                kpi3_data = flows_data['flows_kpi3_net_issuance']['data']
+                if kpi3_data:
+                    # Sum across all tokens for latest week
+                    total_mints = sum(row.get('total_mints', 0) for row in kpi3_data)
+                    total_burns = sum(row.get('total_burns', 0) for row in kpi3_data)
+
+                    summary['total_mints'] = total_mints
+                    summary['total_burns'] = total_burns
+                    summary['net_issuance'] = total_mints - total_burns
+
+            # Try to get counts from KPI2 (weekly aggregates)
+            if 'flows_kpi2_weekly_aggregates' in flows_data:
+                kpi2_data = flows_data['flows_kpi2_weekly_aggregates']['data']
+                if kpi2_data:
+                    mint_count = sum(row.get('mint_count_sum', 0) for row in kpi2_data)
+                    burn_count = sum(row.get('burn_count_sum', 0) for row in kpi2_data)
+
+                    summary['mint_count'] = mint_count
+                    summary['burn_count'] = burn_count
+
+        except Exception as e:
+            logger.debug(f"Could not extract flows summary: {e}")
+
+        return summary
+
+    def _extract_dex_summary(self, dex_data):
+        """Extract key DEX metrics for executive summary"""
+        summary = {
+            'total_volume_usd': None,
+            'total_trades': None,
+            'top_token_by_volume': None,
+            'top_chain_by_volume': None
+        }
+
+        try:
+            # Try to get from KPI2 (weekly volume)
+            if 'dex_kpi2_weekly_volume' in dex_data:
+                kpi2_data = dex_data['dex_kpi2_weekly_volume']['data']
+                if kpi2_data:
+                    total_volume = sum(row.get('volume_usd_sum', 0) for row in kpi2_data)
+                    total_trades = sum(row.get('trade_count_sum', 0) for row in kpi2_data)
+
+                    summary['total_volume_usd'] = total_volume
+                    summary['total_trades'] = total_trades
+
+            # Try to get top token from KPI3 (token breakdown)
+            if 'dex_kpi3_token_breakdown' in dex_data:
+                kpi3_data = dex_data['dex_kpi3_token_breakdown']['data']
+                if kpi3_data:
+                    # First entry should be largest by volume
+                    summary['top_token_by_volume'] = kpi3_data[0].get('stablecoin')
+
+            # Try to get top chain from KPI5 (chain distribution)
+            if 'dex_kpi5_chain_distribution' in dex_data:
+                kpi5_data = dex_data['dex_kpi5_chain_distribution']['data']
+                if kpi5_data:
+                    # First entry should be largest
+                    summary['top_chain_by_volume'] = kpi5_data[0].get('blockchain')
+
+        except Exception as e:
+            logger.debug(f"Could not extract DEX summary: {e}")
+
+        return summary
+
+
+# ============================================================================
+# Backward Compatibility Function Wrapper
+# ============================================================================
+
+def generate_reports(supply_kpis, flows_kpis, dex_kpis, timestamp, output_dir='./data/reports'):
+    """
+    Function wrapper for backward compatibility
 
     Args:
-        supply_report: Dict from MinimalSupplyReporter
-        mintburn_report: Dict from MinimalMintBurnReporter
-        dex_report: Dict from MinimalDexReporter
-        depeg_report: Dict from MinimalDepegReporter (optional, can be None)
-        output_dir: Directory to save consolidated JSON
+        supply_kpis (dict): Supply KPI file paths
+        flows_kpis (dict): Flows KPI file paths
+        dex_kpis (dict): DEX KPI file paths
+        timestamp (str): Timestamp string
+        output_dir (str): Output directory
 
     Returns:
-        Path to consolidated JSON file
+        Path: Path to generated report
     """
-    output_path = Path(output_dir)
-    output_path.mkdir(parents=True, exist_ok=True)
+    generator = ReportGenerator(output_dir=output_dir)
+    return generator.generate_consolidated_report(supply_kpis, flows_kpis, dex_kpis, timestamp)
 
-    # Extract week from supply report (all should have same week)
-    week_label = supply_report['metrics']['week_label'].replace(' ', '_')
 
-    # Determine which domains are included
-    domains_included = ["supply", "mint_burn", "dex_volume"]
-    if depeg_report is not None:
-        domains_included.append("depeg")
+# ============================================================================
+# CLI for Testing
+# ============================================================================
 
-    # Build consolidated structure optimized for visualization
-    consolidated = {
-        "report_metadata": {
-            "report_type": "LATAM Stablecoin Weekly Report - Consolidated",
-            "week": supply_report['metrics']['week_label'],
-            "date_range": supply_report['metrics']['week_date'],
-            "generated_at": datetime.now().isoformat(),
-            "domains_included": domains_included
-        },
-        "executive_summary": {
-            "total_supply_tokens": supply_report['metrics']['total_latam_supply_tokens'],
-            "supply_growth_wow_pct": supply_report['metrics']['supply_growth_wow_pct'],
-            "net_issuance_tokens": mintburn_report['metrics']['total_net_issuance_tokens'],
-            "total_dex_volume_usd": dex_report['metrics']['total_dex_volume_usd'],
-            "avg_volatility_30d": depeg_report['metrics']['avg_30d_volatility'] if depeg_report else None
-        },
-        "supply_metrics": {
-            "total_supply": supply_report['metrics']['total_latam_supply_tokens'],
-            "growth_wow_pct": supply_report['metrics']['supply_growth_wow_pct'],
-            "top_tokens": supply_report['metrics']['top_tokens_by_supply'],
-            "top_chains": supply_report['metrics']['top_chains_by_supply']
-        },
-        "mint_burn_metrics": {
-            "net_issuance": mintburn_report['metrics']['total_net_issuance_tokens'],
-            "expansion_tokens": mintburn_report['metrics']['top_expansion_tokens'],
-            "contraction_tokens": mintburn_report['metrics']['top_contraction_tokens']
-        },
-        "dex_metrics": {
-            "total_volume_usd": dex_report['metrics']['total_dex_volume_usd'],
-            "top_tokens": dex_report['metrics']['top_tokens_by_dex_volume'],
-            "volume_movers": dex_report['metrics']['top_volume_movers']
-        },
-        "narrative": {
-            "overview": f"LATAM stablecoin ecosystem for week {supply_report['metrics']['week_label']} "
-                        f"({supply_report['metrics']['week_date']}) shows "
-                        f"{supply_report['metrics']['total_latam_supply_tokens']:,.0f} tokens in circulation "
-                        f"with a {'positive' if supply_report['metrics']['supply_growth_wow_pct'] > 0 else 'negative'} "
-                        f"growth of {supply_report['metrics']['supply_growth_wow_pct']:+.1f}% week-over-week.",
-            "supply_trend": f"Supply {'expanded' if supply_report['metrics']['supply_growth_wow_pct'] > 0 else 'contracted'} "
-                            f"by {abs(supply_report['metrics']['supply_growth_wow_pct']):.1f}% this week.",
-            "issuance_trend": f"Net issuance was {mintburn_report['metrics']['total_net_issuance_tokens']:+,.0f} tokens, "
-                              f"indicating {'expansion' if mintburn_report['metrics']['total_net_issuance_tokens'] > 0 else 'contraction'} "
-                              f"in the market.",
-            "dex_activity": f"DEX trading volume reached ${dex_report['metrics']['total_dex_volume_usd']:,.0f} "
-                            f"across all LATAM stablecoins."
-        }
+if __name__ == "__main__":
+    """Test report generator with sample data"""
+    from utils.logger import setup_logging
+
+    setup_logging(log_level='DEBUG')
+    logger = get_logger(__name__)
+
+    logger.info("Testing ReportGenerator...")
+
+    # Sample KPI paths (adjust to your actual file structure)
+    sample_supply_kpis = {
+        'supply_kpi1_weekly_supply': './data/kpi/supply_kpi1_weekly_supply_2026W01_20260106.csv',
+        'supply_kpi2_supply_by_chain': './data/kpi/supply_kpi2_supply_by_chain_2026W01_20260106.csv',
     }
 
-    # Add depeg metrics and narrative only if available
-    if depeg_report is not None:
-        consolidated["depeg_metrics"] = {
-            "avg_volatility": depeg_report['metrics']['avg_30d_volatility'],
-            "worst_depegs": depeg_report['metrics']['worst_depegs'],
-            "most_volatile": depeg_report['metrics']['most_volatile_tokens']
-        }
-        consolidated["narrative"]["stability"] = (
-            f"Average 30-day volatility stands at {depeg_report['metrics']['avg_30d_volatility']:.4f}, "
-            f"with {len(depeg_report['metrics']['worst_depegs'])} tokens showing notable depeg events."
-        )
-    else:
-        consolidated["depeg_metrics"] = None
-        consolidated["narrative"]["stability"] = "Depeg monitoring data not available for this report."
+    sample_flows_kpis = {
+        'flows_kpi1_daily_activity': './data/kpi/flows_kpi1_daily_activity_2026W01_20260106.csv',
+    }
 
-    # Write consolidated JSON
-    filename = f"latam_stablecoin_weekly_consolidated_{week_label}.json"
-    filepath = output_path / filename
+    sample_dex_kpis = {
+        'dex_kpi1_daily_volume': './data/kpi/dex_kpi1_daily_volume_2026W01_20260106.csv',
+    }
 
-    with open(filepath, 'w', encoding='utf-8') as f:
-        json.dump(consolidated, f, indent=2, ensure_ascii=False)
+    # Generate report
+    generator = ReportGenerator()
+    report_path = generator.generate_consolidated_report(
+        supply_kpis=sample_supply_kpis,
+        flows_kpis=sample_flows_kpis,
+        dex_kpis=sample_dex_kpis,
+        timestamp='20260106130000'
+    )
 
-    logger.info(f"✓ Consolidated JSON saved: {filepath}")
-
-    if depeg_report is None:
-        logger.info("⚠️  Depeg metrics excluded from consolidated report (data not available)")
-
-    return filepath
+    logger.info(f"Test complete. Report: {report_path}")

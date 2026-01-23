@@ -1,5 +1,4 @@
-pandas==2.0.0
-# numpy==1.24.0
-dune-client==1.2.0
-pyyaml==6.0
-python-dateutil==2.8.2
+pandas>=2.0.0
+dune-client>=1.2.0
+pyyaml>=6.0
+pandas-stubs>=2.3.3.251219

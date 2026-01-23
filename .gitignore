@@ -1,27 +1,86 @@
-# Python
+# ============================================================================
+# LATAM Stablecoin Pipeline - Git Ignore
+# ============================================================================
 
+# ============================================================================
+# Configuration Files (SENSITIVE) - Keep these local only
+# ============================================================================
+config/config.yaml              # Actual config with query IDs and settings
+.env                            # Environment variables with API keys
+*.key                           # Any key files
+secrets/                        # Secrets directory
+
+# ============================================================================
+# Python
+# ============================================================================
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
 .env
 .venv
 venv/
 env/
+ENV/
 
+# ============================================================================
 # IDE
-
+# ============================================================================
 .idea/
 .vscode/
+*.swp
+*.swo
+*~
 
-# Data / logs
-
+# ============================================================================
+# Data / Logs (Generated files)
+# ============================================================================
 data/raw/
-data/kpi_export/
+data/kpi/
 data/reports/
 logs/
+*.log
+*.csv
+*.json
 
+# Exclude specific generated files
+*.tmp
+*.bak
+*.backup
+temp/
+tmp/
+
+# ============================================================================
 # OS
-
+# ============================================================================
 .DS_Store
 Thumbs.db
+
+# ============================================================================
+# Testing
+# ============================================================================
+.pytest_cache/
+.coverage
+htmlcov/
+*.ipynb_checkpoints
