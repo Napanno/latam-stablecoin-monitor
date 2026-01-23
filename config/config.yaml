@@ -1,0 +1,123 @@
+# ============================================================================
+# LATAM Stablecoin Pipeline Configuration
+# ============================================================================
+
+dune:
+  api_key: ${DUNE_API_KEY}
+  query_ids:
+    flows: 6467798
+    dex: 6240220
+
+  # Execution settings
+  max_retries: 3
+  retry_delay_seconds: 30
+  timeout_seconds: 120  # Free tier limit
+  poll_interval_seconds: 5
+
+# ============================================================================
+# Token Configuration
+# ============================================================================
+tokens:
+  # LATAM Stablecoins to monitor
+  tracked_tokens:
+    - blockchain: "bnb"
+      contract_address: "0xb6bb22f4d1e58e9e43efa2ec7f572d215b3cf08a"
+      symbol: "BBRL"
+      decimals: 18
+    - blockchain: "polygon"
+      contract_address: "0x5c067c80c00ecd2345b05e83a3e758ef799c40b5"
+      symbol: "BRL1"
+      decimals: 18
+    - blockchain: "celo"
+      contract_address: "0xfecb3f7c54e2caae9dc6ac9060a822d47e053760"
+      symbol: "BRLA"
+      decimals: 18
+    - blockchain: "polygon"
+      contract_address: "0xe6a537a407488807f0bbeb0038b79004f19dddfb"
+      symbol: "BRLA"
+      decimals: 18
+    - blockchain: "gnosis"
+      contract_address: "0xfecb3f7c54e2caae9dc6ac9060a822d47e053760"
+      symbol: "BRLA"
+      decimals: 18
+    - blockchain: "gnosis"
+      contract_address: "0x0a06c8354a6cc1a07549a38701eac205942e3ac6"
+      symbol: "BRZ"
+      decimals: 18
+    - blockchain: "polygon"
+      contract_address: "0x4ed141110f6eeeaba9a1df36d8c26f684d2475dc"
+      symbol: "BRZ"
+      decimals: 18
+    - blockchain: "base"
+      contract_address: "0xe9185ee218cae427af7b9764a011bb89fea761b4"
+      symbol: "BRZ"
+      decimals: 18
+    - blockchain: "unichain"
+      contract_address: "0xe9185ee218cae427af7b9764a011bb89fea761b4"
+      symbol: "BRZ"
+      decimals: 18
+    - blockchain: "polygon"
+      contract_address: "0x12050c705152931cfee3dd56c52fb09dea816c23"
+      symbol: "COPM"
+      decimals: 18
+    - blockchain: "base"
+      contract_address: "0x269cae7dc59803e5c596c95756faeebb6030e0af"
+      symbol: "MXNe"
+      decimals: 6
+    - blockchain: "base"
+      contract_address: "0x5e40f26e89213660514c51fb61b2d357dbf63c85"
+      symbol: "nARS"
+      decimals: 18
+
+# ============================================================================
+# Output Configuration
+# ============================================================================
+output:
+  base_dir: ./data
+  reports_dir: ./data/reports
+  raw_data_dir: ./data/raw
+  kpi_dir: ./data/kpi
+  logs_dir: ./logs
+
+  # File naming patterns
+  raw_file_pattern: "{domain}_raw_{date}.csv"
+  kpi_file_pattern: "domain_{domain}_{kpi}_{date}.csv"
+  report_file_pattern: "consolidated_report_{date}.json"
+
+# ============================================================================
+# Processing Configuration
+# ============================================================================
+processing:
+  # Time settings
+  lookback_days: 14
+
+  # Data filtering
+  min_trade_size_usd: 1.0
+  exclude_zero_address: true
+  zero_address: "0x0000000000000000000000000000000000000000"
+
+  growth_thresholds:
+    high_growth: 10
+    moderate_growth: 2
+    moderate_decline: -10
+    high_decline: -10
+
+# ============================================================================
+# Reporting Configuration
+# ============================================================================
+reporting:
+  top_n_tokens: 5
+  include_zero_supply: false
+  date_format: "%Y-%m-%d"
+  week_format: "%Y-W%V"
+  show_progress: true
+  verbose: false
+
+# ============================================================================
+# Logging Configuration
+# ============================================================================
+logging:
+  level: INFO
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  max_file_size_mb: 10
+  backup_count: 5
