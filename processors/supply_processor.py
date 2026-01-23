@@ -1,158 +1,300 @@
+"""
+Supply KPI Processor - Domain 1
+Processes flows data to calculate on-chain supply metrics with mint/burn verification
+"""
+
 import pandas as pd
-from typing import Dict
+from pathlib import Path
 from datetime import datetime
-import numpy as np
-from processors.base_processor import BaseProcessor
+from typing import Dict, Optional
 from utils.logger import get_logger
-from utils.date_utils import get_iso_week
 
 logger = get_logger(__name__)
 
 
-class SupplyProcessor(BaseProcessor):
-    """Domain 1: On-Chain Supply KPIs"""
+class SupplyKPIProcessor:
+    """Process flows data to calculate weekly supply KPIs with mint/burn tracking"""
 
-    def __init__(self):
-        super().__init__(domain_name="Supply")
+    def __init__(self, output_dir: str = 'data/kpi'):
+        """Initialize processor"""
+        self.output_dir = Path(output_dir)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        logger.info("SupplyKPIProcessor initialized")
 
-    def process_all(self, raw_data: pd.DataFrame) -> Dict[str, pd.DataFrame]:
+    def process_all(self, df: pd.DataFrame) -> Dict:
         """
-        Process tokens.transfers data for supply metrics
+        Process flows data with supply verification through mint/burn tracking
 
         Args:
-            raw_data: tokens.transfers raw data from Dune
+            df: DataFrame from flows query with mint/burn columns
 
         Returns:
-            Dict with KPIs:
-            - weekly_supply
-            - supply_by_chain
-            - supply_by_token
-            - supply_growth_rate
+            Dictionary with supply KPIs and verification metrics
         """
-        logger.info(f"[{self.domain_name}] Processing {len(raw_data):,} transfer events")
+        if df is None or df.empty:
+            logger.error("Empty flows data received")
+            return {}
 
-        # Step 1: Data cleaning
-        df = self._clean_data(raw_data)
-        self.log_processing_summary(df, "after_cleaning")
+        logger.info(f"Processing supply data: {len(df)} rows")
 
-        # Step 2: Calculate cumulative supply (mints - burns)
-        df = self._calculate_cumulative_supply(df)
-        self.log_processing_summary(df, "after_cumulative")
+        # Clean data
+        df = self._clean_data(df)
 
-        # Step 3: Generate KPIs
-        self.kpi_data = {
-            "weekly_supply": self._kpi1_weekly_supply(df),
-            "supply_by_chain": self._kpi2_supply_by_chain(df),
-            "supply_by_token": self._kpi3_supply_by_token(df),
-            "growth_rate": self._kpi4_growth_rate(df),
+        # Calculate net supply changes from mint/burn
+        supply_changes = self._calculate_supply_changes(df)
+
+        # Calculate mint/burn metrics
+        mint_burn_metrics = self._calculate_mint_burn_metrics(df)
+
+        # Combine results
+        results = {
+            'supply_changes': supply_changes,
+            'mint_burn_metrics': mint_burn_metrics,
+            'mint_activity': df[df['mint_count'] > 0],
+            'burn_activity': df[df['burn_volume_usd'] > 0]
         }
 
-        return self.kpi_data
+        logger.info("✅ Supply processing complete")
+        return results
 
     def _clean_data(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Prepare raw data for processing"""
+        """
+        Clean and prepare flows data
+
+        Args:
+            df: Raw flows DataFrame
+
+        Returns:
+            Cleaned DataFrame
+        """
         df = df.copy()
 
-        # Convert date columns
-        if 'block_time' in df.columns:
-            df['block_time'] = pd.to_datetime(df['block_time'], errors='coerce')
+        # Ensure required columns exist
+        required_columns = [
+            'blockchain', 'symbol', 'week_start', 'transfer_count',
+            'unique_senders', 'unique_receivers', 'total_amount_raw',
+            'total_amount_normalized', 'total_volume_usd', 'avg_transfer_usd',
+            'min_transfer_usd', 'max_transfer_usd', 'mint_count',
+            'mint_volume_usd', 'burn_volume_usd'
+        ]
+
+        missing = [col for col in required_columns if col not in df.columns]
+        if missing:
+            logger.warning(f"Missing columns: {missing}")
+            logger.warning("Make sure econ_flows_query.sql has been updated with mint/burn columns")
+
+        # Convert date column
+        if 'week_start' in df.columns:
+            df['week_start'] = pd.to_datetime(df['week_start'], errors='coerce')
 
         # Convert numeric columns
-        numeric_cols = ['amount', 'amount_usd']
-        df = self.clean_numeric_columns(df, numeric_cols)
+        numeric_columns = [
+            'transfer_count', 'unique_senders', 'unique_receivers',
+            'total_amount_raw', 'total_amount_normalized', 'total_volume_usd',
+            'avg_transfer_usd', 'min_transfer_usd', 'max_transfer_usd',
+            'mint_count', 'mint_volume_usd', 'burn_volume_usd'
+        ]
 
-        # Add week identifier
-        df['week'] = df['block_time'].dt.isocalendar().apply(
-            lambda x: f"{x.year}_W{x.week:02d}", axis=1
-        )
+        for col in numeric_columns:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
 
-        # Remove rows with missing critical data
-        df = df.dropna(subset=['block_time', 'blockchain', 'contract_address'])
-
-        return df
-
-    def _calculate_cumulative_supply(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Calculate cumulative supply by mint/burn logic"""
-        df = df.copy()
-
-        # Identify mints and burns
-        null_address = "0x0000000000000000000000000000000000000000"
-        df['is_mint'] = df['from'].str.lower() == null_address.lower()
-        df['is_burn'] = df['to'].str.lower() == null_address.lower()
-
-        # Calculate supply impact (mints add, burns subtract)
-        df['supply_impact'] = 0
-        df.loc[df['is_mint'], 'supply_impact'] = df['amount']
-        df.loc[df['is_burn'], 'supply_impact'] = -df['amount']
+        # Fill NaN with 0 for volume metrics
+        df = df.fillna(0)
+        df = df.infer_objects(copy=False)
 
         return df
 
-    def _kpi1_weekly_supply(self, df: pd.DataFrame) -> pd.DataFrame:
-        """KPI 1.1 & 1.2: Weekly supply by token/chain + total"""
-        kpi = df.groupby(['week', 'blockchain', 'symbol']).agg({
-            'supply_impact': 'sum',
-            'block_time': 'max'
+    def _calculate_supply_changes(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Calculate net supply changes from mint/burn activity
+
+        Args:
+            df: Cleaned flows DataFrame
+
+        Returns:
+            DataFrame with supply change metrics
+        """
+        # Group by blockchain and symbol for cumulative analysis
+        supply_data = df.groupby(['blockchain', 'symbol']).agg({
+            'mint_volume_usd': 'sum',
+            'burn_volume_usd': 'sum',
+            'total_volume_usd': 'sum',
+            'mint_count': 'sum',
+            'transfer_count': 'sum',
+            'unique_senders': 'sum',
+            'unique_receivers': 'sum'
         }).reset_index()
 
-        # Cumulative supply (group level)
-        kpi['cumulative_supply'] = kpi.groupby(['blockchain', 'symbol'])['supply_impact'].cumsum()
-
-        # Rename for clarity
-        kpi = kpi.rename(columns={'cumulative_supply': 'circulating_supply_tokens'})
-
-        return kpi[['week', 'blockchain', 'symbol', 'circulating_supply_tokens']]
-
-    def _kpi2_supply_by_chain(self, df: pd.DataFrame) -> pd.DataFrame:
-        """KPI 1.4: Supply share by blockchain"""
-        # Get latest week's supply
-        latest_week = df['week'].max()
-        latest = df[df['week'] == latest_week]
-
-        chain_supply = latest.groupby('blockchain').agg({
-            'supply_impact': 'sum'
-        }).reset_index()
-
-        # Calculate total and share
-        total_supply = chain_supply['supply_impact'].sum()
-        chain_supply['chain_share_pct'] = (chain_supply['supply_impact'] / total_supply * 100).round(2)
-
-        return chain_supply.rename(columns={
-            'supply_impact': 'circulating_supply_tokens'
-        })
-
-    def _kpi3_supply_by_token(self, df: pd.DataFrame) -> pd.DataFrame:
-        """KPI 1.3: Supply share by token"""
-        latest_week = df['week'].max()
-        latest = df[df['week'] == latest_week]
-
-        token_supply = latest.groupby('symbol').agg({
-            'supply_impact': 'sum'
-        }).reset_index()
-
-        # Calculate total and share
-        total_supply = token_supply['supply_impact'].sum()
-        token_supply['token_share_pct'] = (token_supply['supply_impact'] / total_supply * 100).round(2)
-
-        token_supply['week'] = latest_week
-
-        return token_supply.rename(columns={
-            'supply_impact': 'circulating_supply_tokens'
-        })[['week', 'symbol', 'circulating_supply_tokens', 'token_share_pct']]
-
-    def _kpi4_growth_rate(self, df: pd.DataFrame) -> pd.DataFrame:
-        """KPI 1.5: Week-over-week supply growth"""
-        weekly_totals = df.groupby('week').agg({
-            'supply_impact': 'sum'
-        }).reset_index().rename(columns={'supply_impact': 'weekly_supply'})
-
-        # Cumulative supply
-        weekly_totals['cumulative_supply'] = weekly_totals['weekly_supply'].cumsum()
-
-        # WoW growth rate
-        weekly_totals['prev_week_supply'] = weekly_totals['cumulative_supply'].shift(1)
-        weekly_totals['growth_rate_pct'] = (
-                (weekly_totals['cumulative_supply'] - weekly_totals['prev_week_supply']) /
-                weekly_totals['prev_week_supply'] * 100
+        # Calculate net supply change
+        supply_data['net_supply_change'] = (
+            supply_data['mint_volume_usd'] - supply_data['burn_volume_usd']
         ).round(2)
 
-        return weekly_totals[['week', 'cumulative_supply', 'growth_rate_pct']]
+        # Calculate mint/burn ratio (with protection for division by zero)
+        supply_data['mint_to_burn_ratio'] = (
+            supply_data['mint_volume_usd'] /
+            (supply_data['burn_volume_usd'] + 1)
+        ).round(2)
+
+        # Calculate inflation rate (net supply change as % of total volume)
+        supply_data['inflation_rate_pct'] = (
+            (supply_data['net_supply_change'] / (supply_data['total_volume_usd'] + 1)) * 100
+        ).round(2)
+
+        # Determine supply trend
+        supply_data['supply_trend'] = supply_data['net_supply_change'].apply(
+            lambda x: 'EXPANSION' if x > 0 else 'CONTRACTION' if x < 0 else 'STABLE'
+        )
+
+        # Calculate burn activity percentage
+        supply_data['burn_activity_pct'] = (
+            (supply_data['burn_volume_usd'] / (supply_data['total_volume_usd'] + 1)) * 100
+        ).round(2)
+
+        # Rank by net supply change
+        supply_data['rank_by_net_supply'] = supply_data['net_supply_change'].rank(
+            ascending=False, method='min'
+        ).astype(int)
+
+        return supply_data
+
+    def _calculate_mint_burn_metrics(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Calculate detailed mint/burn activity metrics
+
+        Args:
+            df: Cleaned flows DataFrame
+
+        Returns:
+            DataFrame with mint/burn metrics
+        """
+        # Weekly aggregated mint/burn
+        weekly_metrics = df.groupby(['blockchain', 'symbol', 'week_start']).agg({
+            'mint_count': 'sum',
+            'mint_volume_usd': 'sum',
+            'burn_volume_usd': 'sum',
+            'transfer_count': 'sum',
+            'total_volume_usd': 'sum'
+        }).reset_index()
+
+        # Calculate net flows
+        weekly_metrics['net_flow_usd'] = (
+            weekly_metrics['mint_volume_usd'] - weekly_metrics['burn_volume_usd']
+        ).round(2)
+
+        # Calculate burn to mint ratio
+        weekly_metrics['burn_to_mint_ratio'] = (
+            weekly_metrics['burn_volume_usd'] /
+            (weekly_metrics['mint_volume_usd'] + 1)
+        ).round(2)
+
+        # Identify minting weeks (where minting occurred)
+        weekly_metrics['had_mints'] = (weekly_metrics['mint_count'] > 0).astype(int)
+        weekly_metrics['had_burns'] = (weekly_metrics['burn_volume_usd'] > 0).astype(int)
+
+        # Calculate mint concentration (mint volume as % of total transfers)
+        weekly_metrics['mint_concentration_pct'] = (
+            (weekly_metrics['mint_volume_usd'] / (weekly_metrics['total_volume_usd'] + 1)) * 100
+        ).round(2)
+
+        # Sort by date descending
+        weekly_metrics = weekly_metrics.sort_values('week_start', ascending=False)
+
+        return weekly_metrics
+
+    def export_kpis(self, results: Dict, timestamp: str = None) -> Dict[str, Path]:
+        """
+        Export KPI results to CSV files
+
+        Args:
+            results: Dictionary with supply KPI DataFrames
+            timestamp: Optional timestamp for filenames
+
+        Returns:
+            Dictionary with filenames of exported files
+        """
+        if timestamp is None:
+            timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
+
+        exported_files = {}
+
+        # Export supply changes
+        if 'supply_changes' in results and results['supply_changes'] is not None:
+            df = results['supply_changes']
+            # Extract week from data if available
+            week = "2026W04"  # Placeholder - extract from actual data in production
+            filename = self.output_dir / f"supply_kpi_changes_{week}_{timestamp}.csv"
+            df.to_csv(filename, index=False)
+            logger.info(f"✓ Exported: {filename}")
+            exported_files['supply_changes'] = filename
+
+        # Export mint/burn metrics
+        if 'mint_burn_metrics' in results and results['mint_burn_metrics'] is not None:
+            df = results['mint_burn_metrics']
+            week = "2026W04"  # Placeholder - extract from actual data in production
+            filename = self.output_dir / f"supply_kpi_mint_burn_metrics_{week}_{timestamp}.csv"
+            df.to_csv(filename, index=False)
+            logger.info(f"✓ Exported: {filename}")
+            exported_files['mint_burn_metrics'] = filename
+
+        # Export mint activity detail
+        if 'mint_activity' in results and results['mint_activity'] is not None:
+            df = results['mint_activity']
+            if not df.empty:
+                week = "2026W04"  # Placeholder
+                filename = self.output_dir / f"supply_kpi_mint_activity_{week}_{timestamp}.csv"
+                df.to_csv(filename, index=False)
+                logger.info(f"✓ Exported: {filename}")
+                exported_files['mint_activity'] = filename
+
+        # Export burn activity detail
+        if 'burn_activity' in results and results['burn_activity'] is not None:
+            df = results['burn_activity']
+            if not df.empty:
+                week = "2026W04"  # Placeholder
+                filename = self.output_dir / f"supply_kpi_burn_activity_{week}_{timestamp}.csv"
+                df.to_csv(filename, index=False)
+                logger.info(f"✓ Exported: {filename}")
+                exported_files['burn_activity'] = filename
+
+        return exported_files
+
+    def generate_summary(self, results: Dict) -> Dict:
+        """
+        Generate summary metrics for reporting
+
+        Args:
+            results: Dictionary with supply KPI DataFrames
+
+        Returns:
+            Dictionary with summary statistics
+        """
+        summary = {
+            'total_tokens_tracked': 0,
+            'total_blockchains': 0,
+            'total_mints_usd': 0,
+            'total_burns_usd': 0,
+            'net_supply_change_usd': 0,
+            'average_inflation_rate': 0,
+            'tokens_in_expansion': 0,
+            'tokens_in_contraction': 0,
+            'tokens_stable': 0
+        }
+
+        if 'supply_changes' in results and results['supply_changes'] is not None:
+            df = results['supply_changes']
+
+            summary['total_tokens_tracked'] = df['symbol'].nunique()
+            summary['total_blockchains'] = df['blockchain'].nunique()
+            summary['total_mints_usd'] = df['mint_volume_usd'].sum()
+            summary['total_burns_usd'] = df['burn_volume_usd'].sum()
+            summary['net_supply_change_usd'] = df['net_supply_change'].sum()
+            summary['average_inflation_rate'] = df['inflation_rate_pct'].mean()
+
+            # Count by trend
+            summary['tokens_in_expansion'] = (df['supply_trend'] == 'EXPANSION').sum()
+            summary['tokens_in_contraction'] = (df['supply_trend'] == 'CONTRACTION').sum()
+            summary['tokens_stable'] = (df['supply_trend'] == 'STABLE').sum()
+
+        return summary
