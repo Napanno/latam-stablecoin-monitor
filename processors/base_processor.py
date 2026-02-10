@@ -4,6 +4,7 @@ import pandas as pd
 from pathlib import Path
 from datetime import datetime
 from utils.logger import get_logger
+from utils.date_utils import extract_week_from_series
 
 logger = get_logger(__name__)
 
@@ -73,10 +74,10 @@ class BaseProcessor(ABC):
 
     def _extract_week_from_data(self, df: pd.DataFrame) -> str:
         """
-        Extract ISO week string from DataFrame if possible
+        Extract ISO week string from DataFrame using standardized utility
 
         Returns:
-            ISO week format (e.g., "2025_W52") or "UNKNOWN"
+            ISO week format (e.g., "2026-W04") or "UNKNOWN"
         """
         if df.empty:
             return "UNKNOWN"
@@ -84,10 +85,16 @@ class BaseProcessor(ABC):
         # Try common week column names
         for col in ["week", "period", "iso_week"]:
             if col in df.columns:
-                # Get first non-null value
-                week_val = df[col].dropna().iloc[0] if not df[col].dropna().empty else None
-                if week_val:
-                    return str(week_val).replace("-", "_")
+                try:
+                    # Get first non-null value
+                    week_series = df[col].dropna()
+                    if not week_series.empty:
+                        # NEW: Use standardized extract_week_from_series
+                        week_val = extract_week_from_series(week_series)
+                        return week_val.replace("-", "_")
+                except (ValueError, TypeError):
+                    # If extraction fails, continue to next column
+                    continue
 
         return "UNKNOWN"
 
@@ -103,9 +110,11 @@ class BaseProcessor(ABC):
             DataFrame with numeric columns converted
         """
         df = df.copy()
+
         for col in columns:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors='coerce')
+
         return df
 
     def log_processing_summary(self, df: pd.DataFrame, stage: str = "input"):

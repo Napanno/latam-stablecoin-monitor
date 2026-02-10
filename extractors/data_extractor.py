@@ -11,6 +11,8 @@ from typing import Dict, Optional
 from dune_client.client import DuneClient
 from dune_client.query import QueryBase
 from utils.logger import get_logger
+from utils.config_validator import ConfigValidator
+from utils.retry_policy import RetryPolicy
 
 logger = get_logger(__name__)
 
@@ -23,6 +25,15 @@ class DuneDataExtractor:
         with open(config_path, 'r') as f:
             self.config = yaml.safe_load(f)
 
+        # CRITICAL FIX #4: Validate configuration on load
+        logger.info("Validating configuration...")
+        try:
+            ConfigValidator.validate_config(self.config, logger)
+            logger.info("✓ Configuration validation passed")
+        except ValueError as e:
+            logger.error(f"✗ Configuration validation failed: {e}")
+            raise
+
         api_key = os.getenv('DUNE_API_KEY')
         if not api_key:
             raise EnvironmentError("DUNE_API_KEY environment variable not set")
@@ -31,14 +42,20 @@ class DuneDataExtractor:
         self.raw_data_dir = Path(self.config['output']['raw_data_dir'])
         self.raw_data_dir.mkdir(parents=True, exist_ok=True)
 
+        # CRITICAL FIX #5: Initialize retry policy from config
+        self.retry_policy = RetryPolicy(
+            max_retries=self.config['execution'].get('max_retries', 3),
+            retry_delay_seconds=self.config['execution'].get('retry_delay_seconds', 30)
+        )
+
         logger.info("DuneDataExtractor initialized")
 
     def fetch_query(self, query_name: str, query_id: int, use_cached: bool = False) -> pd.DataFrame:
         """
-        Fetch query results from Dune with smart strategy
+        Fetch query results from Dune with smart strategy and retry
 
         Strategy:
-        1. Try fresh execution (if use_cached=False)
+        1. Try fresh execution with retry (if use_cached=False)
         2. If execution fails (401/402), fallback to cached results
         3. If cached fails, raise error
 
@@ -56,12 +73,16 @@ class DuneDataExtractor:
         if use_cached:
             return self._fetch_cached(query_name, query_id)
 
-        # Try fresh execution first
+        # Try fresh execution with retry policy
         try:
-            logger.debug(f"Attempting fresh execution for {query_name}...")
-            query = QueryBase(query_id=query_id)
-            df = self.client.run_query_dataframe(query)
-            logger.info(f"✓ {query_name}: Fresh execution - {len(df)} rows, {len(df.columns)} columns")
+            def execute_query():
+                logger.debug(f"Attempting fresh execution for {query_name}...")
+                query = QueryBase(query_id=query_id)
+                df = self.client.run_query_dataframe(query)
+                logger.info(f"✓ {query_name}: Fresh execution - {len(df)} rows, {len(df.columns)} columns")
+                return df
+
+            df = self.retry_policy.execute(execute_query, operation_name=query_name, _logger=logger)
             return df
 
         except Exception as e:
@@ -133,7 +154,7 @@ class DuneDataExtractor:
 
         if missing_columns:
             logger.warning(f"⚠ Missing columns in flows data: {missing_columns}")
-            logger.warning("   Make sure your econ_flows_query.sql has been updated with mint/burn columns")
+            logger.warning(" Make sure your econ_flows_query.sql has been updated with mint/burn columns")
             return {
                 'status': 'FAILED',
                 'error': f'Missing required columns: {missing_columns}',
@@ -171,7 +192,7 @@ class DuneDataExtractor:
             'tokens_with_mints': tokens_with_mints,
             'tokens_with_burns': tokens_with_burns,
             'all_tokens': all_tokens,
-            'inactive_tokens': inactive_tokens,  # Potential data quality issues
+            'inactive_tokens': inactive_tokens,
             'lookback_period': f"{flows_df['week_start'].min()} to {flows_df['week_start'].max()}" if 'week_start' in flows_df.columns else 'Unknown'
         }
 
@@ -179,22 +200,20 @@ class DuneDataExtractor:
         logger.info("=" * 70)
         logger.info("✅ FLOWS DATA VALIDATION REPORT")
         logger.info("=" * 70)
-        logger.info(f"Status:                {validation['status']}")
-        logger.info(f"Total Mints:           ${validation['total_mints']:,.2f}")
-        logger.info(f"Total Burns:           ${validation['total_burns']:,.2f}")
-        logger.info(f"Net Supply Change:     ${validation['net_supply']:,.2f}")
-        logger.info(f"Total Mint Events:     {validation['total_mint_events']}")
-        logger.info(f"Total Burn Events:     {validation['total_burn_events']}")
-        logger.info(f"Lookback Period:       {validation['lookback_period']}")
+        logger.info(f"Status: {validation['status']}")
+        logger.info(f"Total Mints: ${validation['total_mints']:,.2f}")
+        logger.info(f"Total Burns: ${validation['total_burns']:,.2f}")
+        logger.info(f"Net Supply Change: ${validation['net_supply']:,.2f}")
+        logger.info(f"Total Mint Events: {validation['total_mint_events']}")
+        logger.info(f"Total Burn Events: {validation['total_burn_events']}")
+        logger.info(f"Lookback Period: {validation['lookback_period']}")
         logger.info("")
-        logger.info(f"Tokens with Mint Activity:  {validation['tokens_with_mints']}")
-        logger.info(f"Tokens with Burn Activity:  {validation['tokens_with_burns']}")
-        logger.info(f"All Tracked Tokens:         {validation['all_tokens']}")
-
+        logger.info(f"Tokens with Mint Activity: {validation['tokens_with_mints']}")
+        logger.info(f"Tokens with Burn Activity: {validation['tokens_with_burns']}")
+        logger.info(f"All Tracked Tokens: {validation['all_tokens']}")
         if validation['inactive_tokens']:
             logger.warning(f"⚠ Tokens with NO mint/burn activity: {validation['inactive_tokens']}")
-            logger.warning("  → These tokens may have no minting/burning activity OR data quality issue")
-
+            logger.warning(" → These tokens may have no minting/burning activity OR data quality issue")
         logger.info("=" * 70)
 
         return validation
@@ -213,6 +232,7 @@ class DuneDataExtractor:
 
         # Extract flows data
         flows_query_id = self.config['dune']['query_ids']['flows']
+
         try:
             logger.info("=" * 70)
             logger.info("EXECUTING QUERY 1: FLOWS (tokens.transfers)")
@@ -220,9 +240,13 @@ class DuneDataExtractor:
             flows_df = self.fetch_query('flows', flows_query_id, use_cached=use_cached)
             self.save_raw_data(flows_df, 'flows', timestamp)
 
-            # NEW: Validate mint/burn data
+            # CRITICAL FIX #1: Validate and ENFORCE validation result
             logger.info("")
-            self.validate_supply_data(flows_df)
+            validation = self.validate_supply_data(flows_df)
+
+            # If validation failed, raise exception to halt pipeline
+            if validation['status'] != 'SUCCESS':
+                raise ValueError(f"Data validation failed: {validation}")
 
         except Exception as e:
             logger.error(f"✗ Failed to fetch flows data: {e}")
@@ -233,7 +257,9 @@ class DuneDataExtractor:
         logger.info("=" * 70)
         logger.info("EXECUTING QUERY 2: DEX (dex.trades)")
         logger.info("=" * 70)
+
         dex_query_id = self.config['dune']['query_ids']['dex']
+
         try:
             dex_df = self.fetch_query('dex', dex_query_id, use_cached=use_cached)
             self.save_raw_data(dex_df, 'dex', timestamp)

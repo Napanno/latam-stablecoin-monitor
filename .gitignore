@@ -5,10 +5,10 @@
 # ============================================================================
 # Configuration Files (SENSITIVE) - Keep these local only
 # ============================================================================
-config/config.yaml              # Actual config with query IDs and settings
 .env                            # Environment variables with API keys
 *.key                           # Any key files
 secrets/                        # Secrets directory
+config/config.yaml              # Actual config with query IDs and settings
 
 # ============================================================================
 # Python
